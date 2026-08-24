@@ -6,9 +6,42 @@
 
 import os
 
+import pytest_asyncio
+
 os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://fitness:fitness@localhost:5432/fitness",
 )
 os.environ.setdefault("JWT_SECRET", "t" * 32)
 os.environ.setdefault("LLM_API_KEY", "sk-test-not-a-real-key")
 os.environ.setdefault("LLM_MODEL", "test-model")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_engine_pool():
+    """每个测试结束后清空连接池。
+
+    database.py 的 engine 是模块级单例带连接池，而 pytest-asyncio 给每个测试
+    一个新事件循环。asyncpg 连接绑定在创建它的循环上，跨测试复用会报
+    "Event loop is closed"。
+
+    注意不能改用 NullPool 来规避：T4 的并发隔离测试要靠连接复用才能暴露
+    SET（会话级）泄漏。连接池在单个测试内部照常工作，只是测试之间不复用，
+    这对那个测试毫无影响。
+    """
+    yield
+    from app.core.database import engine
+
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture
+async def db():
+    """请求级 session。测试结束回滚，不留脏数据。"""
+    from app.core.database import async_session_maker
+
+    session = async_session_maker()
+    try:
+        yield session
+    finally:
+        await session.rollback()
+        await session.close()
