@@ -15,9 +15,10 @@ pgvector==0.3.6
 # 数据校验
 pydantic==2.12.5
 pydantic-settings==2.12.0
+email-validator==2.2.0
 
 # 认证
-passlib[bcrypt]==1.7.4
+bcrypt==5.0.0
 pyjwt==2.10.1
 
 # HTTP 客户端（LLM 调用）
