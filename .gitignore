@@ -36,3 +36,15 @@ Thumbs.db
 
 # Office 临时锁文件
 ~$*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+backend/.venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/

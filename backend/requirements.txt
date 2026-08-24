@@ -1,0 +1,32 @@
+# AI 健身助理 后端依赖
+# Python 3.12+
+
+# Web 框架
+fastapi==0.128.0
+uvicorn[standard]==0.40.0
+sse-starlette==2.1.3
+
+# 数据库
+sqlalchemy[asyncio]==2.0.46
+asyncpg==0.30.0
+alembic==1.18.3
+pgvector==0.3.6
+
+# 数据校验
+pydantic==2.12.5
+pydantic-settings==2.12.0
+
+# 认证
+passlib[bcrypt]==1.7.4
+pyjwt==2.10.1
+
+# HTTP 客户端（LLM 调用）
+httpx==0.28.1
+
+# 日志
+loguru==0.7.3
+
+# 测试
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-cov==6.0.0
