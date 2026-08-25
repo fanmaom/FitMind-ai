@@ -2,40 +2,57 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: fitness
+      POSTGRES_USER: fitness_admin
       POSTGRES_PASSWORD: fitness
       POSTGRES_DB: fitness
     ports:
       - "5433:5432"          # 宿主机 5433，避开本机已有的 Postgres
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fitness"]
+      test: ["CMD-SHELL", "pg_isready -U fitness_admin -d fitness"]
       interval: 5s
       timeout: 3s
       retries: 10
 
   server:
     build: ./backend
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://fitness:fitness@postgres:5432/fitness
+      DATABASE_URL: postgresql+asyncpg://fitness_app:fitness@postgres:5432/fitness
     env_file: .env
     ports:
       - "8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   worker:
     build: ./backend
     command: python -m app.core.jobs.worker
     environment:
-      DATABASE_URL: postgresql+asyncpg://fitness:fitness@postgres:5432/fitness
-      WORKER_DATABASE_URL: postgresql+asyncpg://fitness:fitness@postgres:5432/fitness
+      DATABASE_URL: postgresql+asyncpg://fitness_app:fitness@postgres:5432/fitness
+      WORKER_DATABASE_URL: postgresql+asyncpg://fitness_worker:fitness_worker@postgres:5432/fitness
     env_file: .env
     depends_on:
-      postgres:
+      server:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./web
+      args:
+        NEXT_PUBLIC_API_BASE: http://localhost:8000/api/v1
+    ports:
+      - "3000:3000"
+    depends_on:
+      server:
         condition: service_healthy
 
 volumes:
