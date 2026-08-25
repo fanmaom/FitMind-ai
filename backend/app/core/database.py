@@ -3,8 +3,11 @@
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+import uuid
+
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, Session
 
 from app.core.config import get_settings
 from app.core.logger import logger
@@ -63,3 +66,29 @@ async def session_scope() -> AsyncGenerator[AsyncSession, None]:
         raise
     finally:
         await session.close()
+
+
+# ── RLS 上下文 ────────────────────────────────────────────────────────────
+#
+# set_config(..., true) 是事务级的，COMMIT / ROLLBACK 之后就失效。这带来一个
+# 隐蔽的问题：Agent 一轮会连着调多个工具，写入类工具内部会 commit，之后
+# 同一个 session 上的所有查询都会被 RLS 过滤成零行——查不到数据，还不报错。
+#
+# 不靠"记得在每次 commit 后重设"（那又回到了靠自觉），而是挂事件：
+# 任何新事务一开始就自动注入上下文，让它成为 session 的不变量。
+
+RLS_USER_KEY = "rls_user_id"
+
+
+def bind_rls_user(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """把用户身份绑定到 session。此后该 session 的每个事务都会自动带上它。"""
+    session.info[RLS_USER_KEY] = str(user_id)
+
+
+@event.listens_for(Session, "after_begin")
+def _apply_rls_context(session: Session, transaction, connection) -> None:
+    user_id = session.info.get(RLS_USER_KEY)
+    if user_id:
+        connection.execute(
+            text("SELECT set_config('app.user_id', :uid, true)"), {"uid": user_id},
+        )

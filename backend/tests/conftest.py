@@ -45,3 +45,22 @@ async def db():
     finally:
         await session.rollback()
         await session.close()
+
+
+@pytest_asyncio.fixture
+async def seeded_user(db):
+    """建一个用户并把 RLS 上下文切到他名下。"""
+    import uuid as _uuid
+
+    from sqlalchemy import text
+
+    from app.models.user import User
+
+    from app.core.database import bind_rls_user
+
+    user = User(email=f"tool-{_uuid.uuid4().hex[:8]}@test.com", password_hash="x")
+    db.add(user)
+    await db.flush()
+    bind_rls_user(db, user.id)
+    await db.execute(text("SELECT set_config('app.user_id', :uid, true)"), {"uid": str(user.id)})
+    return user.id
