@@ -9,6 +9,7 @@ from app.models.llm_usage import LLMUsage
 from app.models.job import Job
 from app.models.message import Message
 from app.models.memory import Memory
+from app.models.plan import Plan
 from app.models.profile import Profile
 from app.models.user import User
 from app.models.workout_log import WorkoutLog
@@ -20,6 +21,7 @@ __all__ = [
     "Job",
     "Message",
     "Memory",
+    "Plan",
     "Profile",
     "User",
     "WorkoutLog",
