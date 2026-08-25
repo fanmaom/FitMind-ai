@@ -63,11 +63,11 @@ class TestHandle:
 
         written = []
 
-        async def fake_insert(session, user_id, content, category, confidence, source_id):
+        async def fake_reconcile(session, user_id, content, category, confidence, source_id):
             written.append((user_id, content, category, confidence, source_id))
 
         monkeypatch.setattr(module, "extract_facts", fake_extract)
-        monkeypatch.setattr(module, "insert_fact", fake_insert)
+        monkeypatch.setattr(module, "reconcile_fact", fake_reconcile)
         await handle_extract_memory(db, {
             "user_id": str(seeded_user),
             "conversation_text": "对话",

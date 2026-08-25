@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.llm.client import ChatRequest
 from app.core.llm.factory import build_provider
 from app.core.logger import logger
-from app.core.memory.facts import insert_fact
+from app.core.memory.reconcile import reconcile_fact
 
 MIN_CONFIDENCE = 0.7
 VALID_CATEGORIES = {
@@ -103,8 +103,7 @@ async def handle_extract_memory(session: AsyncSession, payload: dict) -> None:
             f"事实抽取：{len(facts)} 条中 {len(facts) - len(kept)} 条低于置信度阈值被丢弃",
         )
     for fact in kept:
-        # T24 接入 reconcile_fact；T23 先保证异步抽取/队列链路独立可用。
-        await insert_fact(
+        await reconcile_fact(
             session, user_id, fact.content, fact.category,
             fact.confidence, source_message_id,
         )
