@@ -4,7 +4,8 @@
 """
 
 from app.models.body_metric import BodyMetric
+from app.models.llm_usage import LLMUsage
 from app.models.user import User
 from app.models.workout_log import WorkoutLog
 
-__all__ = ["BodyMetric", "User", "WorkoutLog"]
+__all__ = ["BodyMetric", "LLMUsage", "User", "WorkoutLog"]
