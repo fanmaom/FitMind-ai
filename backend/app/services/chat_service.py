@@ -19,6 +19,7 @@ from app.core.llm.factory import build_provider
 from app.core.llm.usage_recorder import record_usage
 from app.core.llm.with_fallback import FallbackProvider
 from app.core.logger import logger
+from app.core.memory.facts import recall
 from app.core.memory.profile import load_profile
 from app.core.tools.registry import ToolContext, registry
 from app.models.message import Message
@@ -151,9 +152,14 @@ async def _run_turn_inner(
 
     # 正常路径
     profile = await load_profile(session, user_id)
+    recalled = await recall(session, user_id, user_text, k=5)
     history = await load_history(session, conversation_id)
     messages, budget = build_context(
-        profile=profile, facts=[], history=history, user_text=user_text, today=today,
+        profile=profile,
+        facts=[memory.content for memory in recalled],
+        history=history,
+        user_text=user_text,
+        today=today,
     )
     logger.info(
         f"上下文预算 total={budget.total} system={budget.system} "

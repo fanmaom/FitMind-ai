@@ -7,6 +7,7 @@ from app.models.body_metric import BodyMetric
 from app.models.conversation import Conversation
 from app.models.llm_usage import LLMUsage
 from app.models.message import Message
+from app.models.memory import Memory
 from app.models.profile import Profile
 from app.models.user import User
 from app.models.workout_log import WorkoutLog
@@ -16,6 +17,7 @@ __all__ = [
     "Conversation",
     "LLMUsage",
     "Message",
+    "Memory",
     "Profile",
     "User",
     "WorkoutLog",

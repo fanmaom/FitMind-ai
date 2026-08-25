@@ -94,3 +94,16 @@ async def _reset_sse_app_status():
     sse_module.AppStatus.should_exit = False
     yield
     sse_module.AppStatus.should_exit_event = None
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _disable_chat_memory_network(monkeypatch):
+    """普通对话测试不访问真实 embedding 网关。
+
+    事实召回本身由 test_facts.py 通过真实 pgvector 查询覆盖；聊天接缝测试可在
+    单项测试中覆盖此替身。这样全量单测不依赖外网与真实 API key。
+    """
+    async def no_recalled_facts(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr("app.services.chat_service.recall", no_recalled_facts)
