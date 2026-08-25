@@ -16,6 +16,17 @@ os.environ.setdefault("LLM_API_KEY", "sk-test-not-a-real-key")
 os.environ.setdefault("LLM_MODEL", "test-model")
 
 
+# 工具注册在应用的 lifespan 里完成，但 httpx 的 ASGITransport 不会跑 lifespan。
+# 这里显式加载一次，与生产行为保持一致（load_tools 幂等）。
+def _load_tools_once() -> None:
+    from app.core.tools.registry import load_tools
+
+    load_tools()
+
+
+_load_tools_once()
+
+
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_engine_pool():
     """每个测试结束后清空连接池。
@@ -64,3 +75,22 @@ async def seeded_user(db):
     bind_rls_user(db, user.id)
     await db.execute(text("SELECT set_config('app.user_id', :uid, true)"), {"uid": str(user.id)})
     return user.id
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_sse_app_status():
+    """重置 sse_starlette 的模块级退出事件。
+
+    sse_starlette 用一个模块级 AppStatus.should_exit_event 做优雅关闭，它是
+    懒创建的，会绑定到第一个碰它的事件循环。pytest-asyncio 每个测试一个新
+    循环，第二个用到 SSE 的测试就会炸
+    "Event object is bound to a different event loop"。
+
+    只影响测试：生产环境整个进程一个循环，不存在这个问题。
+    """
+    import sse_starlette.sse as sse_module
+
+    sse_module.AppStatus.should_exit_event = None
+    sse_module.AppStatus.should_exit = False
+    yield
+    sse_module.AppStatus.should_exit_event = None
