@@ -103,3 +103,30 @@ class TestPlanStrengthCycle:
             await registry.invoke("plan_strength_cycle", {
                 "lifts": {}, "weeks": 8, "scheme": "linear",
             }, ctx=ToolContext(user_id=seeded_user, session=db))
+
+
+class TestPlanCutPhase:
+    @pytest.mark.asyncio
+    async def test_cut_plan_persists_cycle_and_keeps_model_result_small(self, db, seeded_user):
+        ctx = ToolContext(user_id=seeded_user, session=db)
+        loop = AgentLoop(None, ctx)
+        result_text, card = await loop._execute_tool("plan_cut_phase", {
+            "tdee": 2770.6, "weight_kg": 82, "weeks": 8, "carb_cycle": True,
+        })
+        result = json.loads(result_text)
+        assert len(result_text) < 600
+        assert result["weekly_change_kg"] < 0
+        assert card["type"] == "cut_plan"
+        assert len(card["payload"]["weeks"]) == 8
+
+    @pytest.mark.asyncio
+    async def test_carb_cycle_has_high_and_low_days_with_stable_average(self, db, seeded_user):
+        ctx = ToolContext(user_id=seeded_user, session=db)
+        out = await registry.invoke("plan_cut_phase", {
+            "tdee": 2770.6, "weight_kg": 82, "weeks": 4, "carb_cycle": True,
+        }, ctx=ctx)
+        plan = await db.get(Plan, uuid.UUID(out["plan_id"]))
+        days = plan.payload["weeks"][0]["days"]
+        assert {day["day_type"] for day in days} >= {"high", "low"}
+        average = sum(day["carb_g"] for day in days) / 7
+        assert average == pytest.approx(plan.payload["daily_target"]["carb_g"], abs=0.2)

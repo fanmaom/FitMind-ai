@@ -3,6 +3,7 @@
 from pydantic import BaseModel, Field
 
 from app.core.domain.macros import Goal, compute_macros
+from app.core.domain.projection import KCAL_PER_KG_BODYWEIGHT, SAFE_WEEKLY_RATE
 from app.core.tools.registry import ToolContext, tool
 
 
@@ -20,7 +21,13 @@ class CalcMacrosInput(BaseModel):
 )
 async def calc_macros(inp: CalcMacrosInput, ctx: ToolContext) -> dict:
     r = compute_macros(inp.tdee, inp.goal, inp.weight_kg)
+    weekly_change = round(r.deficit_kcal * 7 / KCAL_PER_KG_BODYWEIGHT, 3)
+    if abs(weekly_change) > inp.weight_kg * SAFE_WEEKLY_RATE:
+        rate_note = "预计每周体重变化超过当前体重的 1%，速度过快，建议缩小热量差。"
+    else:
+        rate_note = "预计每周体重变化在通常采用的安全范围内。"
     return {
         "kcal": r.kcal, "protein_g": r.protein_g, "carb_g": r.carb_g,
         "fat_g": r.fat_g, "deficit_kcal": r.deficit_kcal,
+        "weekly_change_kg": weekly_change, "rate_note": rate_note,
     }

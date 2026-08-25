@@ -55,9 +55,20 @@ class TestCalcMacros:
         out = await registry.invoke("calc_macros", {
             "tdee": 2600, "goal": "cut", "weight_kg": 80,
         }, ctx=None)
-        assert set(out) == {"kcal", "protein_g", "carb_g", "fat_g", "deficit_kcal"}
+        assert set(out) == {
+            "kcal", "protein_g", "carb_g", "fat_g", "deficit_kcal",
+            "weekly_change_kg", "rate_note",
+        }
         assert out["protein_g"] == pytest.approx(176.0)
         assert out["kcal"] < 2600
+
+    @pytest.mark.asyncio
+    async def test_returns_weekly_rate_and_safety_note(self):
+        out = await registry.invoke("calc_macros", {
+            "tdee": 2770.6, "goal": "cut", "weight_kg": 82,
+        }, ctx=None)
+        assert out["weekly_change_kg"] == pytest.approx(-0.45, abs=0.02)
+        assert out["rate_note"]
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_goal(self):
