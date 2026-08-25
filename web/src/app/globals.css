@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #f8fafc; color: #0f172a; font-family: Arial, "PingFang SC", "Microsoft YaHei", sans-serif; }
+button, input, textarea { font: inherit; }
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 999px; }

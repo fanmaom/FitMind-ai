@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_echo: bool = False
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
 
     # 认证
     jwt_secret: str = Field(min_length=32, description="至少 32 字符")

@@ -11,6 +11,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.deps import RequestContext, get_context
 from app.models.workout_log import WorkoutLog
+from app.models.body_metric import BodyMetric
 
 router = APIRouter(prefix="/api/v1/logs", tags=["logs"])
 
@@ -66,3 +67,10 @@ async def list_workouts(ctx: RequestContext = Depends(get_context)) -> list[dict
         {"id": str(r.id), "date": r.date.isoformat(), "exercise": r.exercise, "sets": r.sets}
         for r in rows
     ]
+
+
+@router.get("/body-metrics")
+async def list_body_metrics(ctx: RequestContext = Depends(get_context)) -> list[dict]:
+    rows = await ctx.session.scalars(select(BodyMetric).order_by(BodyMetric.date))
+    return [{"id": str(row.id), "date": row.date.isoformat(), "weight_kg": row.weight_kg,
+             "body_fat_pct": row.body_fat_pct} for row in rows]
