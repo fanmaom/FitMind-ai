@@ -11,7 +11,11 @@ const toolLabels: Record<string, string> = { query_workout_history: "正在查�
 
 export function ChatView({ onChanged }: { onChanged: () => void }) {
   const store = useChatStore(); const [sending, setSending] = useState(false); const end = useRef<HTMLDivElement>(null);
-  useEffect(() => end.current?.scrollIntoView({ behavior: "smooth" }), [store.messages, store.toolStatus]);
+  useEffect(() => {
+    // 新版 Chromium 的 scrollIntoView 可能返回 Promise。effect 若隐式返回它，
+    // React 会把 Promise 当作清理函数，并在下一次流式更新时调用而崩溃。
+    end.current?.scrollIntoView({ behavior: "smooth" });
+  }, [store.messages, store.toolStatus]);
   async function ensureConversation() { if (store.conversationId) return store.conversationId; const c = await api<{id:string}>("/conversations", { method: "POST" }); store.setConversationId(c.id); return c.id; }
   async function send(text: string) {
     setSending(true); store.addUser(text);
