@@ -18,6 +18,7 @@ from app.core.database import async_session_maker, bind_rls_user
 from app.core.llm.factory import build_provider
 from app.core.llm.usage_recorder import record_usage
 from app.core.llm.with_fallback import FallbackProvider
+from app.core.jobs.queue import enqueue
 from app.core.logger import logger
 from app.core.memory.facts import recall
 from app.core.memory.profile import load_profile
@@ -208,3 +209,21 @@ async def _run_turn_inner(
             yield {"event": "error", "data": ev.data}
 
     yield await finish(level, usage, tool_calls, {})
+
+    # 用户可见的回复已经完成；下面是重要但不紧急的异步抽取投递。
+    try:
+        conversation_text = f"用户：{user_text}\n助理：{''.join(texts)}"
+        await enqueue(
+            session,
+            "extract_memory",
+            {
+                "user_id": str(user_id),
+                "conversation_text": conversation_text,
+                "source_message_id": str(assistant.id),
+            },
+            user_id=user_id,
+        )
+        await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        await session.rollback()
+        logger.warning(f"投递记忆抽取任务失败，不影响本轮回复：{exc}")

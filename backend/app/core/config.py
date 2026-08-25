@@ -20,6 +20,7 @@ class Settings(BaseSettings):
 
     # 数据库
     database_url: str = Field(description="postgresql+asyncpg://...")
+    worker_database_url: str = ""
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_echo: bool = False
@@ -48,6 +49,13 @@ class Settings(BaseSettings):
     def _must_be_async_driver(cls, v: str) -> str:
         if not v.startswith("postgresql+asyncpg://"):
             raise ValueError("database_url 必须使用 asyncpg 驱动（postgresql+asyncpg://）")
+        return v
+
+    @field_validator("worker_database_url")
+    @classmethod
+    def _worker_must_be_async_driver_or_empty(cls, v: str) -> str:
+        if v and not v.startswith("postgresql+asyncpg://"):
+            raise ValueError("worker_database_url 必须为空或使用 asyncpg 驱动")
         return v
 
     @property

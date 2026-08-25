@@ -30,6 +30,23 @@ async_session_maker = async_sessionmaker(
     autoflush=False,
 )
 
+# worker 需要用具备 BYPASSRLS 的独立数据库角色跨用户领取 jobs。
+# Docker 开发环境的数据库 owner 可直接复用；生产环境应设置 WORKER_DATABASE_URL。
+worker_engine = create_async_engine(
+    settings.worker_database_url or settings.database_url,
+    pool_size=max(1, settings.db_pool_size // 2),
+    max_overflow=max(1, settings.db_max_overflow // 2),
+    pool_pre_ping=True,
+    echo=settings.db_echo,
+)
+worker_session_maker = async_sessionmaker(
+    worker_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+    autocommit=False,
+    autoflush=False,
+)
+
 
 class Base(DeclarativeBase):
     """SQLAlchemy 模型基类。"""

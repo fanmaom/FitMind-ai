@@ -40,9 +40,10 @@ async def _reset_engine_pool():
     这对那个测试毫无影响。
     """
     yield
-    from app.core.database import engine
+    from app.core.database import engine, worker_engine
 
     await engine.dispose()
+    await worker_engine.dispose()
 
 
 @pytest_asyncio.fixture
