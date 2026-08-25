@@ -1,20 +1,178 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
-import { Brain, Dumbbell, PanelRightClose, PanelRightOpen, Trash2, UserRound } from "lucide-react";
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { api } from "@/services/api";
 
-const labels: Record<string, string> = { height_cm: "身高", weight_kg: "当前体重", age: "年龄", sex: "生理性别", activity: "活动量", target_kg: "目标体重", goal: "当前目标", phase_started_on: "周期开始", training_split: "训练分化", training_years: "训练年限", equipment: "可用器械", lifts: "当前 1RM", injuries: "伤病", dislikes: "忌口", meal_scenarios: "用餐场景" };
-type Tab = "profile" | "memory" | "data";
+import { useCallback, useEffect, useState } from "react";
+import {
+  Brain,
+  ChartNoAxesCombined,
+  ClipboardPlus,
+  PanelRightClose,
+  PanelRightOpen,
+  Trash2,
+  UserRound,
+} from "lucide-react";
+import { api } from "@/services/api";
+import { DataPanel } from "./DataPanel";
+import { ProfilePanel } from "./ProfilePanel";
+import { TrainingPanel } from "./TrainingPanel";
+
+type Tab = "profile" | "memory" | "data" | "training";
+
+export type Workout = {
+  id: string;
+  date: string;
+  exercise: string;
+  sets: Array<{ weight: number; reps: number; rpe?: number | null }>;
+};
+
+export type BodyMetric = {
+  id: string;
+  date: string;
+  weight_kg: number;
+  body_fat_pct?: number | null;
+};
 
 export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
-  const [open, setOpen] = useState(true); const [tab, setTab] = useState<Tab>("profile");
-  const [profile, setProfile] = useState<Record<string, any>>({}); const [memories, setMemories] = useState<any[]>([]);
-  const [metrics, setMetrics] = useState<any[]>([]); const [workouts, setWorkouts] = useState<any[]>([]);
-  const [usage, setUsage] = useState<any>({});
-  const load = useCallback(async () => { const [p, m, b, w, u] = await Promise.all([api<Record<string,any>>("/profile"), api<any[]>("/memories"), api<any[]>("/logs/body-metrics"), api<any[]>("/logs/workouts"), api<any>("/usage/summary")]); setProfile(p); setMemories(m); setMetrics(b); setWorkouts(w); setUsage(u); }, []);
-  useEffect(() => { load().catch(() => undefined); }, [load, refreshKey]);
-  if (!open) return <button onClick={() => setOpen(true)} className="border-l bg-white px-3 text-slate-500" title="打开记忆面板"><PanelRightOpen/></button>;
-  return <aside className="flex w-[360px] shrink-0 flex-col border-l border-slate-200 bg-white"><header className="flex items-center justify-between p-4"><div><b>你的数据</b><p className="text-xs text-slate-500">可见、可追溯、可删除</p></div><button onClick={() => setOpen(false)} className="text-slate-400"><PanelRightClose/></button></header><div className="grid grid-cols-3 border-y text-sm">{([['profile',UserRound,'档案'],['memory',Brain,'记忆'],['data',Dumbbell,'数据']] as const).map(([key,Icon,text]) => <button key={key} onClick={() => setTab(key)} className={`flex items-center justify-center gap-1 py-3 ${tab===key?'border-b-2 border-blue-600 text-blue-600':'text-slate-500'}`}><Icon size={15}/>{text}</button>)}</div><div className="flex-1 overflow-y-auto p-4">{tab === "profile" && <div className="space-y-3">{Object.entries(labels).map(([key,label]) => <div key={key} className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">{label}</div><div className="mt-1 break-words text-sm">{profile[key] == null ? <span className="text-slate-400">未填写</span> : typeof profile[key] === 'object' ? JSON.stringify(profile[key], null, 0) : String(profile[key])}</div></div>)}<p className="text-xs text-slate-400">需要修改？直接在左侧对话中告诉我。</p></div>}{tab === "memory" && <div className="space-y-3">{memories.length === 0 && <Empty text="还没有长期记忆"/>}{memories.map(m => <div key={m.id} className="rounded-lg border p-3"><div className="flex justify-between gap-2"><span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">{m.category}</span><button onClick={async()=>{await api(`/memories/${m.id}`,{method:'DELETE'}); setMemories(x=>x.filter(y=>y.id!==m.id));}} className="text-slate-400 hover:text-red-500"><Trash2 size={15}/></button></div><p className="mt-2 text-sm">{m.content}</p><time className="mt-2 block text-xs text-slate-400">{new Date(m.created_at).toLocaleDateString()}</time></div>)}</div>}{tab === "data" && <div className="space-y-5"><section className="grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded bg-slate-50 p-2"><b className="block text-lg">{usage.total_input ?? 0}</b>输入 token</div><div className="rounded bg-slate-50 p-2"><b className="block text-lg">{Math.round((usage.cache_hit_rate ?? 0)*100)}%</b>缓存命中</div><div className="rounded bg-slate-50 p-2"><b className="block text-lg">{Math.round((usage.degradation_rate ?? 0)*100)}%</b>降级率</div></section><section><b className="text-sm">体重趋势</b><div className="mt-2 h-44 rounded bg-slate-50 p-2">{metrics.length ? <ResponsiveContainer width="100%" height="100%"><LineChart data={metrics}><XAxis dataKey="date" tick={{fontSize:10}}/><YAxis domain={['dataMin - 2','dataMax + 2']} width={32}/><Tooltip/><Line type="monotone" dataKey="weight_kg" stroke="#2563eb" strokeWidth={2}/></LineChart></ResponsiveContainer> : <Empty text="还没有体重记录"/>}</div></section><section><b className="text-sm">最近训练</b><div className="mt-2 space-y-2">{workouts.slice(0,8).map(w => <div key={w.id} className="rounded bg-slate-50 p-3 text-sm"><b>{w.exercise}</b><span className="float-right text-xs text-slate-400">{w.date}</span><p className="mt-1 text-xs text-slate-500">{w.sets.length} 组</p></div>)}{!workouts.length && <Empty text="还没有训练记录"/>}</div></section></div>}</div></aside>;
+  const [open, setOpen] = useState(true);
+  const [tab, setTab] = useState<Tab>("profile");
+  const [profile, setProfile] = useState<Record<string, unknown>>({});
+  const [memories, setMemories] = useState<any[]>([]);
+  const [metrics, setMetrics] = useState<BodyMetric[]>([]);
+  const [workouts, setWorkouts] = useState<Workout[]>([]);
+  const [usage, setUsage] = useState<Record<string, number>>({});
+
+  const load = useCallback(async () => {
+    const [nextProfile, nextMemories, nextMetrics, nextWorkouts, nextUsage] =
+      await Promise.all([
+        api<Record<string, unknown>>("/profile"),
+        api<any[]>("/memories"),
+        api<BodyMetric[]>("/logs/body-metrics"),
+        api<Workout[]>("/logs/workouts"),
+        api<Record<string, number>>("/usage/summary"),
+      ]);
+    setProfile(nextProfile);
+    setMemories(nextMemories);
+    setMetrics(nextMetrics);
+    setWorkouts(nextWorkouts);
+    setUsage(nextUsage);
+  }, []);
+
+  useEffect(() => {
+    load().catch(() => undefined);
+  }, [load, refreshKey]);
+
+  async function refreshMetrics() {
+    setMetrics(await api<BodyMetric[]>("/logs/body-metrics"));
+  }
+
+  async function refreshWorkouts() {
+    setWorkouts(await api<Workout[]>("/logs/workouts"));
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => setOpen(true)}
+        className="border-l bg-white px-3 text-slate-500"
+        title="打开数据面板"
+      >
+        <PanelRightOpen />
+      </button>
+    );
+  }
+
+  const tabs = [
+    ["profile", UserRound, "档案"],
+    ["memory", Brain, "记忆"],
+    ["data", ChartNoAxesCombined, "数据"],
+    ["training", ClipboardPlus, "训练"],
+  ] as const;
+
+  return (
+    <aside className="flex w-[400px] shrink-0 flex-col border-l border-slate-200 bg-white">
+      <header className="flex items-center justify-between p-4">
+        <div>
+          <b>你的数据</b>
+          <p className="text-xs text-slate-500">可编辑、可追溯、可删除</p>
+        </div>
+        <button onClick={() => setOpen(false)} className="text-slate-400">
+          <PanelRightClose />
+        </button>
+      </header>
+
+      <div className="grid grid-cols-4 border-y text-xs">
+        {tabs.map(([key, Icon, text]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`flex items-center justify-center gap-1 py-3 ${
+              tab === key
+                ? "border-b-2 border-blue-600 text-blue-600"
+                : "text-slate-500"
+            }`}
+          >
+            <Icon size={14} />
+            {text}
+          </button>
+        ))}
+      </div>
+
+      <div className="flex-1 overflow-y-auto p-4">
+        {tab === "profile" && (
+          <ProfilePanel
+            profile={profile}
+            onSaved={async (nextProfile) => {
+              setProfile(nextProfile);
+              await refreshMetrics();
+            }}
+          />
+        )}
+
+        {tab === "memory" && (
+          <div className="space-y-3">
+            {memories.length === 0 && <Empty text="还没有长期记忆" />}
+            {memories.map((memory) => (
+              <div key={memory.id} className="rounded-lg border p-3">
+                <div className="flex justify-between gap-2">
+                  <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
+                    {memory.category}
+                  </span>
+                  <button
+                    onClick={async () => {
+                      await api(`/memories/${memory.id}`, { method: "DELETE" });
+                      setMemories((items) =>
+                        items.filter((item) => item.id !== memory.id),
+                      );
+                    }}
+                    className="text-slate-400 hover:text-red-500"
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+                <p className="mt-2 text-sm">{memory.content}</p>
+                <time className="mt-2 block text-xs text-slate-400">
+                  {new Date(memory.created_at).toLocaleDateString()}
+                </time>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === "data" && (
+          <DataPanel usage={usage} metrics={metrics} workouts={workouts} />
+        )}
+
+        {tab === "training" && (
+          <TrainingPanel workouts={workouts} onCreated={refreshWorkouts} />
+        )}
+      </div>
+    </aside>
+  );
 }
-function Empty({text}:{text:string}) { return <div className="flex h-full min-h-24 items-center justify-center text-sm text-slate-400">{text}</div>; }
+
+function Empty({ text }: { text: string }) {
+  return (
+    <div className="flex min-h-24 items-center justify-center text-sm text-slate-400">
+      {text}
+    </div>
+  );
+}

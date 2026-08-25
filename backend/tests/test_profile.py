@@ -1,13 +1,16 @@
 """L1 档案层。"""
 
 import uuid
+from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from app.core.memory.profile import PROFILE_FIELDS, load_profile, merge_profile
 from app.core.tools.registry import ToolContext, load_tools, registry
 from app.main import app
+from app.models.body_metric import BodyMetric
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -40,6 +43,26 @@ class TestStorage:
         await merge_profile(db, seeded_user, {"weight_kg": 82.0})
         await merge_profile(db, seeded_user, {"weight_kg": 81.0})
         assert (await load_profile(db, seeded_user))["weight_kg"] == 81.0
+
+        rows = (await db.scalars(
+            select(BodyMetric).where(BodyMetric.user_id == seeded_user),
+        )).all()
+        assert len(rows) == 1, "同一天修改体重应更新趋势点，不应重复新增"
+        assert rows[0].date == date.today()
+        assert rows[0].weight_kg == 81.0
+
+    @pytest.mark.asyncio
+    async def test_non_weight_update_does_not_append_metric(self, db, seeded_user):
+        await merge_profile(db, seeded_user, {"height_cm": 178.0})
+        rows = (await db.scalars(
+            select(BodyMetric).where(BodyMetric.user_id == seeded_user),
+        )).all()
+        assert rows == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_weight_rejected(self, db, seeded_user):
+        with pytest.raises(ValueError, match="weight_kg"):
+            await merge_profile(db, seeded_user, {"weight_kg": -1})
 
     @pytest.mark.asyncio
     async def test_rejects_unknown_fields(self, db, seeded_user):

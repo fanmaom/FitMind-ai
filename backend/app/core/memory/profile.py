@@ -1,11 +1,14 @@
 """L1 档案层读写。"""
 
+import hashlib
 import uuid
+from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.body_metric import BodyMetric
 from app.models.profile import Profile
 
 # 模型可能编出任意 key。档案会注入每轮 prompt，所以写入必须经过白名单。
@@ -51,11 +54,34 @@ async def merge_profile(session: AsyncSession, user_id: uuid.UUID, updates: dict
     validate_fields(updates)
 
     current = await load_profile(session, user_id)
+    previous_weight = current.get("weight_kg")
     for key, value in updates.items():
         if value is None:
             current.pop(key, None)
         else:
             current[key] = value
+
+    weight = current.get("weight_kg")
+    if "weight_kg" in updates and weight is not None and weight != previous_weight:
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= 500:
+            raise ValueError("weight_kg 必须是 0–500 之间的数字")
+        day = date.today()
+        raw = f"profile|{user_id}|{day.isoformat()}"
+        key = hashlib.sha256(raw.encode()).hexdigest()[:64]
+        await session.execute(
+            pg_insert(BodyMetric)
+            .values(
+                user_id=user_id,
+                date=day,
+                weight_kg=float(weight),
+                body_fat_pct=None,
+                idempotency_key=key,
+            )
+            .on_conflict_do_update(
+                index_elements=["user_id", "idempotency_key"],
+                set_={"weight_kg": float(weight), "updated_at": func.now()},
+            ),
+        )
 
     await session.execute(
         pg_insert(Profile)
