@@ -18,7 +18,10 @@ services:
 
   server:
     build: ./backend
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    # exec 让 uvicorn 顶替 shell 成为 PID 1。不加 exec 时 sh 是 PID 1，而它
+    # 不会把 SIGTERM 转发给子进程——docker stop 等满宽限期后发 SIGKILL，
+    # 退出码 137，正在处理的请求被硬切。
+    command: sh -c "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://fitness_app:fitness@postgres:5432/fitness
     env_file: .env
@@ -27,6 +30,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # SSE 长连接与 Agent 回合都可能跑十几秒，给足收尾时间。
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 5s
@@ -43,6 +48,9 @@ services:
     depends_on:
       server:
         condition: service_healthy
+    # worker 收到 SIGTERM 后会跑完手上这批任务再退。一批最多 10 条，
+    # 单条最慢是待办抽取（一次抽取 + 最多 9 次判定），留足余量。
+    stop_grace_period: 60s
 
   web:
     build:

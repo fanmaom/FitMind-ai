@@ -164,9 +164,27 @@ flowchart LR
 **计算不交给模型。** 所有数字（TDEE、营养素克数、1RM、周期重量、距目标天数）
 都由 `core/domain/` 下的纯函数算出。模型只负责理解意图、编排工具、组织语言。
 
-**异步旁路不影响主链路。** 事实抽取和待办抽取都在回复发送**之后**投递到
-PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判重出错，都不会影响
-用户已经看到的那次回复。
+**异步旁路不影响主链路。** 事实抽取、待办抽取和会话摘要都在回复发送**之后**
+投递到 PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判重出错，
+都不会影响用户已经看到的那次回复。
+
+队列有两道保障。**看门狗**回收卡死的 `running`：worker 在执行途中硬退出
+（SIGKILL、OOM）时任务会永久停在 `running`，而 `claim_jobs` 只捞 `pending`，
+没有任何机制会再碰它——抽取就此丢失，不报错也不重试。回收时照常累加
+`attempts`，否则一个必然把 worker 打死的任务会被无限回收、无限打死 worker，
+堵住整个队列。**优雅退出**让 `docker stop` 变成"跑完手上这批再退"：正在执行的
+任务被立即标为可重试，而不是留在 `running` 等十分钟后才被回收。
+
+实测停机行为：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| `worker` 停止耗时 | 等满宽限期 | **1 秒** |
+| `worker` 退出码 | **137**（SIGKILL） | **0** |
+| `server` 停止耗时 | 等满宽限期 | **0 秒** |
+
+`server` 的根因在 compose 的 `sh -c "alembic ... && uvicorn ..."`：shell 是
+PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 PID 1 即可。
 
 ---
 
@@ -187,7 +205,7 @@ PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判�
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 666 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 687 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -693,8 +711,8 @@ backend/
       jobs/            PostgreSQL 队列与 worker
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
-  alembic/versions/    13 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               666 个测试
+  alembic/versions/    14 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
+  tests/               687 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -753,7 +771,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 666 passed
+make test          # 687 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -766,11 +784,11 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **666 passed** |
+| 后端测试 | **687 passed** |
 | 总覆盖率 | **93%**（2312 statements，154 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |
-| 迁移 | 13 个，全部验证 upgrade → downgrade → upgrade 往返 |
+| 迁移 | 14 个，全部验证 upgrade → downgrade → upgrade 往返 |
 
 值得一提的几类测试：
 
@@ -831,12 +849,10 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 - 待办判重每条候选多一次 LLM 调用（实测 2.8–4.3 秒），只在向量粗筛命中近邻时
   发生，且结果走进程内 LRU 缓存。缓存是**进程内**的：多副本部署时各自独立，
   worker 重启即失效——重判一次只是多花几秒，不会出错。
-- jobs 队列没有「running 超时自动回收」的看门狗；worker 在执行中硬退出时，
-  需人工把该任务从 `running` 重置为 `pending`。
 - 待办溯源是降级版：目标消息在当前已加载会话里就滚动高亮，不在就展示原文摘录。
   完整的跨会话跳转需要先做会话列表 UI。
-- worker 与 server 容器不响应 SIGTERM，`docker-compose stop` 时会等满宽限期
-  被 SIGKILL（退出码 137），执行中的 job 会被硬切。
+- 看门狗按固定阈值（10 分钟）判定卡死，不区分任务类型。如果将来加入正常耗时
+  远超十分钟的任务类型，需要改成按类型配阈值，否则它会被误判成卡死并重复执行。
 - Docker 首次构建需要访问 Python 与 npm 软件源；模型调用还需要能访问配置的网关。
 
 ---
