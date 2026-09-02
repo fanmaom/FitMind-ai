@@ -203,9 +203,10 @@ PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 P
 | 不稳定输出处理 | JSON 解析容错 + 判定调用重试 + 置信度阈值丢弃 | `core/llm/judge.py`, `core/memory/extractor.py` |
 | 用户数据隔离 | PostgreSQL 行级安全 + 三角色分离 + JWT | `scripts/init_db.sql`, `core/database.py` |
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
+| 生成中断 | 热路径纯内存查询；跨进程靠 PG LISTEN/NOTIFY 广播 | `services/interrupt.py` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 687 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 709 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -588,6 +589,48 @@ JSON 解析容错收在一处，记忆冲突消解和待办判重共用。判定
 
 ---
 
+## 生成中断
+
+用户点「停止」时前端打一个 interrupt 请求，Agent 循环在推每个事件之前查一次
+旗子，见旗即收尾。中断实现为「**不再消费事件**」，`AgentLoop` 零改动。
+
+**键是 `conversation_id` 而不是 message id**：前端在收到 `message_start` 之前
+就可能点停止（手快，或首个 token 迟迟不来），那时它手上只有 `conversation_id`。
+用 message id 会漏掉最该中断的那一段等待。
+
+### 热路径必须是内存查询
+
+`is_requested` 的调用频率是**每个 token 一次**。做成数据库查询意味着每个 token
+一条 SELECT——这是热路径上最不该出现的东西。所以旗子始终存在进程内存里。
+
+但只有内存就无法跨进程：多 uvicorn worker 或多副本部署时，interrupt 请求落到
+另一个进程就失效了——界面显示「已停止」，实际还在烧 token。这是最坏的一种失败。
+
+解法是 **PostgreSQL LISTEN/NOTIFY**：写本地 set 的同时广播一条通知，每个进程
+的监听器收到后写进自己的 set。热路径成本一点没变，跨进程语义补上了。数据库
+已经在那里，不需要引入 Redis。
+
+| 决策 | 理由 |
+|---|---|
+| 请求走 `await`，清理也走 `await` | fire-and-forget 时进程恰好在返回后关闭（部署、重启）会把通知丢掉 |
+| **清理也要广播** | 不广播则另一个进程的旗子一直留着，把该会话的**下一个**回合一启动就杀掉——「上次点了停止，之后第一条消息永远没反应」的跨进程版本 |
+| 监听连接记录所属事件循环 | asyncpg 连接绑在创建它的循环上，`uvicorn --reload` 换循环后复用会抛 `future belongs to a different loop`，必须重建 |
+| 监听起不来只告警 | 退化成单进程行为（本进程内中断照常工作），比因为一个辅助通道连不上就整个服务起不来要好 |
+| 脏 payload 不打死监听器 | 那会让整个进程失去跨进程中断能力 |
+
+### 中断后的收尾
+
+- 已执行完的工具写入**不回滚**——记进去的训练不该凭空消失，只停后续步骤
+- **不投递抽取任务**：从半句话里抽长期事实会污染 L2，抽待办更糟——半截建议会
+  变成一条用户根本没读完的待跟进事项
+- `interrupted` 与 `done` 同等纳入历史：用户已经看见那半句，模型也必须看见，
+  否则下一轮会跟屏幕上还挂着的半句自相矛盾
+- 脱敏缓冲要 flush：用户已经看见的半句必须和落库的一致
+- 前端 `stop()` 顺序为「先 POST interrupt 插旗 → 再 abort → 再本地标记」，
+  反序会造成假中断
+
+---
+
 ## 用户数据隔离与隐私
 
 ### PostgreSQL 行级安全（RLS）
@@ -712,7 +755,7 @@ backend/
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    14 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               687 个测试
+  tests/               709 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -771,7 +814,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 687 passed
+make test          # 709 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -784,7 +827,7 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **687 passed** |
+| 后端测试 | **709 passed** |
 | 总覆盖率 | **93%**（2312 statements，154 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |

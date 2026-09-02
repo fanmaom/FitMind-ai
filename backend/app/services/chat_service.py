@@ -122,7 +122,10 @@ async def run_turn(
     # 开局先清一次旗。中断请求可能在上一个回合**已经结束后**才到达，那面旗子
     # 会留在登记表里，把这个回合一启动就当场杀掉。这是那种「上次点了停止，
     # 之后第一条消息永远没反应」的诡异 bug。
-    interrupt_registry.clear(conversation_id)
+    #
+    # 用可等待版本：清理也要广播出去，否则另一个进程的旗子会一直留着，
+    # 换成跨进程版本的同一个 bug。
+    await interrupt_registry.clear_and_broadcast(conversation_id)
     try:
         async with _own_session(user_id) as session:
             async for event in _run_turn_inner(
@@ -130,7 +133,7 @@ async def run_turn(
             ):
                 yield event
     finally:
-        interrupt_registry.clear(conversation_id)
+        await interrupt_registry.clear_and_broadcast(conversation_id)
 
 
 @asynccontextmanager

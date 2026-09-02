@@ -116,6 +116,23 @@ async def _reset_judge_caches():
 
 
 @pytest_asyncio.fixture(autouse=True)
+async def _reset_interrupt_listener():
+    """每个测试结束后关掉中断广播监听。
+
+    监听连接是模块级的 asyncpg 连接，绑定在创建它的事件循环上。pytest-asyncio
+    每个测试一个新循环，留着跨测试复用会抛
+    "future belongs to a different loop"。
+
+    与 _reset_engine_pool 同理，只影响测试：生产环境整个进程一个循环。
+    """
+    yield
+    from app.services import interrupt
+
+    await interrupt.stop_listener()
+    interrupt._requested.clear()
+
+
+@pytest_asyncio.fixture(autouse=True)
 async def _disable_chat_memory_network(monkeypatch):
     """普通对话测试不访问真实 embedding 网关。
 

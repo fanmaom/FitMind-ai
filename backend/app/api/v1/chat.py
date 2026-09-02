@@ -81,7 +81,9 @@ async def interrupt_turn(
     而不是错误。旗子由 run_turn 在开头和 finally 里清理，不会残留到下一回合。
     """
     await _get_conversation(ctx, conversation_id)
-    interrupt.request(conversation_id)
+    # await 而非 fire-and-forget：返回 204 时广播应该已经在路上了。否则进程
+    # 恰好在这之后关闭（部署、重启）会把通知丢掉，而用户已经看到"已停止"。
+    await interrupt.request_and_broadcast(conversation_id)
     logger.info(f"收到中断请求 conversation={conversation_id}")
 
 

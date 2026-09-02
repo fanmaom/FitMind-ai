@@ -14,12 +14,16 @@ from app.api.v1.usage import router as usage_router
 from app.core.config import get_settings
 from app.core.logger import logger
 from app.core.tools.registry import load_tools
+from app.services import interrupt
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     load_tools()
+    # 中断信号的跨进程广播。起不来只告警——退化成单进程行为，本进程内的中断
+    # 照常工作，比因为一个辅助通道连不上就让整个服务起不来要好。
+    await interrupt.start_listener()
     if settings.llm_configured:
         logger.info(f"启动中，LLM provider={settings.llm_provider} model={settings.llm_model}")
     else:
@@ -28,6 +32,7 @@ async def lifespan(app: FastAPI):
             "对话功能将不可用；数据库、认证、记录功能正常。请在 .env 中补齐。",
         )
     yield
+    await interrupt.stop_listener()
     logger.info("已关闭")
 
 
