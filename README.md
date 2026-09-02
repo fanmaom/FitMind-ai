@@ -187,7 +187,7 @@ PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判�
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 638 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 648 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -417,10 +417,40 @@ async def calc_macros(args: CalcMacrosArgs, ctx: ToolContext) -> dict:
 - **快路径**：`卧推 80kg 5x5` 这类明确的记录意图由正则直接命中工具，
   全程不碰模型，几十毫秒返回。既省钱又快，还绕开了模型可能的误解。
 - **单工具超时**：`AGENT_TOOL_TIMEOUT_S`（默认 3 秒），超时不拖死整轮。
+- **超时后必须回滚**：`asyncio.wait_for` 超时会取消协程，而被取消的协程可能
+  正卡在一条 SQL 上。asyncpg 连接被留在"事务已开始、语句未完成"的状态，
+  之后对**同一个 session** 的任何操作都抛 `PendingRollbackError`。影响远超
+  "这一个工具没算出来"——本轮剩下的工具全失败，连收尾时把助理消息落库的那次
+  commit 也失败，用户的整个回合凭空消失。而超时被转成一句温和的文本反馈，
+  把这个故障完全掩盖了。所以超时与异常分支都显式 `rollback()`；回滚本身
+  失败时（连接真断了）改口让模型停手，别再调工具。
+  写入类工具各自 `commit`，所以回滚不会撤销已记录的训练。
 - **参数校验**：Schema 不匹配抛 `ToolValidationError`，把错误回喂给模型让它改，
-  而不是直接失败。
+  而不是直接失败。校验在执行之前发生，没碰数据库，因此**不**回滚——多余的
+  回滚会把同一事务里前面工具做的事撤掉。
 - **幂等**：`client_message_id` 去重，同一条消息重复提交只处理一次；
   日志写入也做了重复检测。
+
+### 同轮多工具为什么不并发
+
+`loop.py` 里同一轮的多个工具是**串行**执行的。看起来是个明显的优化点，
+实测后否决：
+
+| 工具 | 单次耗时 |
+|---|---|
+| `calc_energy_baseline` | 0.0018 ms |
+| `calc_macros` | 0.0036 ms |
+| `estimate_1rm` | 0.0011 ms |
+| `project_goal` | 0.0022 ms |
+
+15 个工具里 11 个都碰数据库，而它们共享同一个 `AsyncSession`——asyncpg 连接
+不允许两个协程同时使用，并发这些工具会直接炸 `another operation is in
+progress`。真正能安全并发的只剩上面 4 个纯计算工具，而它们耗时在**微秒级**，
+省下来的时间比测量噪声还小，模型单轮响应却是秒级。
+
+要让并发有意义，得给每个工具单独开 session——那会引出跨 session 的事务边界与
+RLS 绑定问题，为了微秒级收益不值得。**这条路记在这里，是为了让下一个想优化
+它的人不必重新测一遍。**
 
 ### 内部名字不出现在回复里
 
@@ -630,7 +660,7 @@ backend/
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    13 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               638 个测试
+  tests/               648 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -689,7 +719,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 638 passed
+make test          # 648 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -702,7 +732,7 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **638 passed** |
+| 后端测试 | **648 passed** |
 | 总覆盖率 | **93%**（2312 statements，154 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |

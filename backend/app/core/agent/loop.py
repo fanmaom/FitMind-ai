@@ -43,6 +43,32 @@ class AgentLoop:
         self.tool_timeout_s = tool_timeout_s
         self.max_output_tokens = max_output_tokens
 
+    async def _recover_session(self, reason: str) -> bool:
+        """把被中途取消的事务回滚掉，让 session 能继续用。
+
+        asyncio.wait_for 超时会取消协程，而被取消的协程可能正卡在一条 SQL 上。
+        asyncpg 连接被留在"事务已开始、语句未完成"的状态，SQLAlchemy 随后对
+        **同一个 session** 的任何操作都抛 PendingRollbackError：
+
+            Can't reconnect until invalid transaction is rolled back.
+
+        后果远超"这一个工具没算出来"：本轮剩下的工具全部失败，连收尾时把助理
+        消息落库的那次 commit 也失败——用户的整个回合凭空消失。而超时在
+        _execute_tool 里被转成一句温和的文本反馈，把这个严重故障完全掩盖了。
+
+        返回是否成功恢复。回滚本身也可能失败（连接真的断了），那种情况下
+        session 已经不可用，只能把实情反馈给模型。
+        """
+        if self.tool_ctx is None:
+            return True
+        try:
+            await self.tool_ctx.session.rollback()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"{reason} 后回滚失败，session 已不可用：{exc}")
+            return False
+        logger.warning(f"{reason} 后已回滚事务，session 恢复可用")
+        return True
+
     async def _execute_tool(self, name: str, args: dict) -> tuple[str, dict | None]:
         """执行工具，返回 (回灌给模型的文本, 给前端的卡片)。
 
@@ -56,17 +82,28 @@ class AgentLoop:
             )
         except ToolValidationError as exc:
             # 字段名必须留着，模型要靠它改参数；脱敏层拦在输出侧。
+            # 参数校验发生在执行之前，没碰数据库，不需要回滚。
             return f"{FEEDBACK_PREFIX} {exc}", None
         except ToolNotFoundError as exc:
             # 这里反过来：模型编了个工具名，不点出来它改不过来。
             return f"{FEEDBACK_PREFIX} 工具不存在：{exc}", None
         except asyncio.TimeoutError:
+            recovered = await self._recover_session(f"工具 {name} 超时")
+            if not recovered:
+                return (
+                    f"{FEEDBACK_PREFIX} “{label}”执行超时，且数据连接已不可用。"
+                    f"用自然语言告诉用户这一步没完成、稍后重试，不要再调用任何工具。",
+                    None,
+                )
             return (
                 f"{FEEDBACK_PREFIX} “{label}”执行超时（{self.tool_timeout_s}s）。"
                 f"用自然语言告诉用户这一步没算出来，换一种方式或稍后重试。", None
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"工具 {name} 执行异常")
+            # 工具执行到一半抛异常同样会留下未回滚的事务。数据库异常
+            # （唯一约束冲突、死锁）都走这条路，不回滚后续照样连锁失败。
+            await self._recover_session(f"工具 {name} 异常")
             return (
                 f"{FEEDBACK_PREFIX} “{label}”执行失败：{exc}。"
                 f"用自然语言告诉用户这一步没成，不要暴露报错原文。", None
