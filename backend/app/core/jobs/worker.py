@@ -7,12 +7,14 @@ from app.core.database import async_session_maker, bind_rls_user, worker_session
 from app.core.jobs.queue import claim_jobs, complete, fail
 from app.core.logger import logger
 from app.core.memory.extractor import handle_extract_memory
+from app.core.memory.summary import handle_summarize_conversation
 from app.models.job import Job
 
 POLL_INTERVAL_S = 2.0
 HANDLERS = {
     "extract_memory": handle_extract_memory,
     "extract_actions": handle_extract_actions,
+    "summarize_conversation": handle_summarize_conversation,
 }
 
 

@@ -19,6 +19,7 @@ class ContextBudget:
     system: int
     profile: int
     facts: int
+    summary: int
     history: int
     total: int
 
@@ -66,17 +67,41 @@ def _render_facts(facts: list[str]) -> str:
     return f"关于这位用户你已知的事实（按相关度召回）：\n{lines}"
 
 
+def _render_summary(summary: str) -> str:
+    """渲染更早对话的摘要。
+
+    明确标注它是"更早的对话"而非当前事实——否则模型会把摘要里那些已经过时的
+    中间结论当成现状复述。摘要天生滞后，这个标注是必要的。
+    """
+    if not summary.strip():
+        return ""
+    return f"更早的对话摘要（比下面的原文更旧，如与原文冲突以原文为准）：\n{summary.strip()}"
+
+
 def compress_history(history: list[dict], keep_recent: int, max_tokens: int) -> list[dict]:
     """三段式压缩：最近 keep_recent 轮原样保留，更早的在超预算时从最旧开始丢弃。
 
-    敢丢的前提是记忆系统已经把该记的抽取到 L2 事实层了——历史对话只负责
-    短期连贯性，长期记忆是另一套机制的事。两个机制缺一个另一个就跛脚：
-    只压缩不记忆会失忆，只记忆不压缩会爆上下文。
+    历史对话只负责短期连贯性，长期信息由另外两套机制承担：稳定事实进 L2，
+    被丢弃段落的上下文进会话摘要（core/memory/summary.py）。三者缺一个其余
+    就跛脚——只压缩不记忆会失忆，只记忆不压缩会爆上下文，只丢不摘则会忘记
+    "这个计划当初是按什么前提排的"（那既不是稳定事实，也不是训练日志，
+    L2 和 L3 两条通道都不收）。
+    """
+    return _compress(history, keep_recent, max_tokens)[0]
+
+
+def _compress(
+    history: list[dict], keep_recent: int, max_tokens: int,
+) -> tuple[list[dict], bool]:
+    """返回 (压缩后的历史, 是否丢弃了内容)。
+
+    第二个返回值决定要不要注入摘要：没丢东西时注入摘要纯属浪费 token，
+    而且摘要与原文重复会让模型在两份说法之间摇摆。
     """
     if not history:
-        return []
+        return [], False
     if len(history) <= keep_recent:
-        return list(history)
+        return list(history), False
 
     recent = history[-keep_recent:]
     older = history[:-keep_recent]
@@ -90,7 +115,7 @@ def compress_history(history: list[dict], keep_recent: int, max_tokens: int) -> 
         kept.insert(0, msg)
         used += cost
 
-    return kept + recent
+    return kept + recent, len(kept) < len(older)
 
 
 def build_context(
@@ -100,6 +125,7 @@ def build_context(
     history: list[dict],
     user_text: str,
     today: str,
+    summary: str = "",
     keep_recent: int = KEEP_RECENT_TURNS,
     max_history_tokens: int = MAX_HISTORY_TOKENS,
 ) -> tuple[list[dict], ContextBudget]:
@@ -108,6 +134,9 @@ def build_context(
     keep_recent 默认取模块常量，但调用方应传 settings.agent_history_window
     ——那个配置项存在、有文档、也能从环境变量读进来，却一直没有被接到这里，
     改它没有任何效果。这种"看起来能调、实际调不动"的配置比没有更糟。
+
+    summary 只在压缩确实丢弃了内容时才注入。没丢就不注入：那样纯属浪费
+    token，而且摘要与还在上下文里的原文重复，会让模型在两份说法之间摇摆。
     """
     profile_block = _render_profile(profile)
     facts_block = _render_facts(facts)
@@ -115,15 +144,19 @@ def build_context(
     # 1 系统提示：恒定，作为缓存前缀
     messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # 2 档案 + 运行时信息 + 事实：放在缓存断点之后。
+    # 3 先压缩历史，因为要知道有没有真的丢东西才能决定注不注入摘要
+    compressed, dropped = _compress(history, keep_recent, max_history_tokens)
+    summary_block = _render_summary(summary) if dropped else ""
+
+    # 2 档案 + 运行时信息 + 事实 + 摘要：放在缓存断点之后。
     #   "今天是几号"每天变，写进系统提示会打断缓存前缀。
     parts = [profile_block, f"今天是 {today}。"]
     if facts_block:
         parts.append(facts_block)
+    if summary_block:
+        parts.append(summary_block)
     messages.append({"role": "system", "content": "\n\n".join(parts)})
 
-    # 3 压缩后的历史
-    compressed = compress_history(history, keep_recent, max_history_tokens)
     messages.extend(compressed)
 
     # 4 当前用户消息：永远最后
@@ -133,6 +166,7 @@ def build_context(
         system=estimate_tokens(SYSTEM_PROMPT),
         profile=estimate_tokens(profile_block),
         facts=estimate_tokens(facts_block),
+        summary=estimate_tokens(summary_block),
         history=sum(estimate_tokens(str(m.get("content", ""))) for m in compressed),
         total=sum(estimate_tokens(str(m.get("content", ""))) for m in messages),
     )

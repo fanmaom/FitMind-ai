@@ -24,6 +24,7 @@ from app.core.logger import logger
 from app.core.memory.facts import recall
 from app.core.memory.profile import load_profile
 from app.core.memory.query import build_context_query
+from app.core.memory.summary import load_summary
 from app.core.tools.registry import ToolContext, registry
 from app.models.message import Message
 from app.services import interrupt as interrupt_registry
@@ -235,17 +236,24 @@ async def _run_turn_inner(
     recalled = await recall(session, user_id, queries, k=5)
     if context_query is not None:
         logger.info(f"续问句启用上文补充检索，共 {len(queries)} 路，召回 {len(recalled)} 条")
+
+    # 只读已有摘要，不在这里生成——生成要调模型，而这条路径在用户等回复上。
+    # 摘要由 worker 在回合结束后异步更新，因此总是滞后一轮；滞后的那轮恰好
+    # 还在 keep_recent 窗口里原样保留着，不构成缺口。
+    summary_row = await load_summary(session, conversation_id)
     messages, budget = build_context(
         profile=profile,
         facts=[memory.content for memory in recalled],
         history=history,
         user_text=user_text,
         today=today,
+        summary=summary_row.content if summary_row else "",
         keep_recent=settings.agent_history_window,
     )
     logger.info(
         f"上下文预算 total={budget.total} system={budget.system} "
-        f"profile={budget.profile} history={budget.history}",
+        f"profile={budget.profile} facts={budget.facts} "
+        f"summary={budget.summary} history={budget.history}",
     )
 
     # 构造失败（最常见是 LLM 未配置）不上抛，传 None 让循环走 L4。
@@ -355,6 +363,19 @@ async def _run_turn_inner(
             {**source, "source_conversation_id": str(conversation_id)},
             user_id=user_id,
         )
+        # 摘要只在会话已经长到"下一轮可能丢东西"时才投。每轮都投等于给每次
+        # 对话白加一次 LLM 调用，而短会话的历史全都在窗口里、根本没有缺口
+        # 要填。阈值取窗口的两倍：到这个长度时最旧的部分已经接近被挤出去。
+        if len(history) + 2 >= settings.agent_history_window * 2:
+            await enqueue(
+                session,
+                "summarize_conversation",
+                {
+                    "user_id": str(user_id),
+                    "conversation_id": str(conversation_id),
+                },
+                user_id=user_id,
+            )
         await session.commit()
     except Exception as exc:  # noqa: BLE001
         await session.rollback()

@@ -6,6 +6,7 @@
 from app.models.action_item import ActionItem
 from app.models.body_metric import BodyMetric
 from app.models.conversation import Conversation
+from app.models.conversation_summary import ConversationSummary
 from app.models.food import Food
 from app.models.llm_usage import LLMUsage
 from app.models.job import Job
@@ -20,6 +21,7 @@ __all__ = [
     "ActionItem",
     "BodyMetric",
     "Conversation",
+    "ConversationSummary",
     "Food",
     "LLMUsage",
     "Job",
