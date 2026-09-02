@@ -189,7 +189,12 @@ async def _run_turn_inner(
         level: int, usage: dict | None, tool_calls: int, extra: dict,
         *, status: str = "done",
     ) -> dict:
-        assistant.content = {"text": "".join(texts), "cards": cards}
+        content: dict = {"text": "".join(texts), "cards": cards}
+        # 截断标记要落库，不能只发 SSE：断线重连走 list_messages 取回历史，
+        # 只发不存的话重连后那句半截话又变得"看起来正常"了。
+        if extra.get("truncated"):
+            content["truncated"] = extra["truncated"]
+        assistant.content = content
         assistant.status = status
         await record_usage(
             session=session, user_id=user_id, conversation_id=conversation_id,
@@ -280,6 +285,10 @@ async def _run_turn_inner(
 
     level, usage, tool_calls = 0, None, 0
     interrupted = False
+    # 两种截断：output 是"这句话没说完"（模型撞上输出上限），turns 是"这件事
+    # 没做完"（Agent 轮次用尽）。之前两者都只写日志，用户看到的是一句半截话
+    # 且没有任何提示——比报错更难查，因为它看起来就像模型答完了。
+    truncation = {"output": False, "turns": False}
     # 脱敏放在这一层，而不是 loop 里：这里是文本同时"发给用户"和"落库"的唯一
     # 出口。落库的必须也是脱敏后的——重连要取回它，下一轮还要当历史喂回模型，
     # 只擦流不擦库等于把泄漏留在库里慢慢发酵。
@@ -313,6 +322,10 @@ async def _run_turn_inner(
                 yield {"event": "card", "data": ev.data}
             elif ev.type == "done":
                 level, usage = ev.data["degradation_level"], ev.data.get("usage")
+                truncation = {
+                    "output": bool(ev.data.get("output_truncated")),
+                    "turns": bool(ev.data.get("truncated")),
+                }
             elif ev.type == "error":
                 level = ev.data["degradation_level"]
                 # 先把扣在脱敏缓冲里的尾巴发出去，再接降级文案，否则顺序会颠倒
@@ -345,7 +358,10 @@ async def _run_turn_inner(
         # 更糟——半截建议会变成一条用户根本没读完的待跟进事项。
         return
 
-    yield await finish(level, usage, tool_calls, {})
+    # 只在真的截断时才带上这个键。无条件写会让每条正常消息的 meta 里多两个
+    # false，历史与重连响应里也就多两份噪声。
+    hit = [kind for kind, happened in truncation.items() if happened]
+    yield await finish(level, usage, tool_calls, {"truncated": hit} if hit else {})
 
     # 用户可见的回复已经完成；下面是重要但不紧急的异步抽取投递。
     #

@@ -152,6 +152,7 @@ class AgentLoop:
             for _turn in range(self.max_turns):
                 text_parts: list[str] = []
                 pending_calls = None
+                hit_output_limit = False
 
                 async for chunk, lv in self.provider.stream_with_fallback(
                     ChatRequest(
@@ -168,8 +169,9 @@ class AgentLoop:
                         pending_calls = chunk.tool_calls
                     if chunk.finish_reason == "length" and text_parts:
                         # 说了一半被输出上限截断。空输出由降级层当失败重试，这里
-                        # 是"有正文但没说完"——重试会重复已经推给用户的字，只能
-                        # 留下记录：连续出现就该把 LLM_MAX_TOKENS 调大。
+                        # 是"有正文但没说完"——重试会重复已经推给用户的字，所以
+                        # 只能如实告诉用户这句话没说完。
+                        hit_output_limit = True
                         logger.warning(
                             f"本轮输出被 max_tokens={self.max_output_tokens} 截断，"
                             f"已产出 {len(''.join(text_parts))} 字",
@@ -178,7 +180,12 @@ class AgentLoop:
                 if not pending_calls:
                     yield AgentEvent("done", {
                         "degradation_level": level, "usage": usage,
-                        "tool_calls": tool_call_count, "truncated": False,
+                        "tool_calls": tool_call_count,
+                        # 两种截断分开报：一种是"这句话没说完"（输出上限），
+                        # 一种是"这件事没做完"（轮次用尽）。给用户的说法不同，
+                        # 该采取的动作也不同。
+                        "truncated": False,
+                        "output_truncated": hit_output_limit,
                     })
                     return
 
@@ -207,6 +214,7 @@ class AgentLoop:
             yield AgentEvent("done", {
                 "degradation_level": level, "usage": usage,
                 "tool_calls": tool_call_count, "truncated": True,
+                "output_truncated": False,
             })
             return
 
@@ -228,6 +236,7 @@ class AgentLoop:
             yield AgentEvent("done", {
                 "degradation_level": 4, "usage": None,
                 "tool_calls": tool_call_count, "truncated": False,
+                "output_truncated": False,
             })
             return
 

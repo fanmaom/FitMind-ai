@@ -44,7 +44,7 @@ export function ChatView({ onChanged }: { onChanged: () => void }) {
         else if (event === "tool_start") store.setToolStatus(data.label ? `正在${data.label}…` : FALLBACK_TOOL_STATUS);
         else if (event === "tool_result") store.setToolStatus(undefined);
         else if (event === "card") store.addCard(data);
-        else if (event === "message_done") { store.finish(data.degradedTo ?? 0); onChanged(); }
+        else if (event === "message_done") { store.finish(data.degradedTo ?? 0, data.truncated); onChanged(); }
         else if (event === "interrupted") { store.interrupt(); onChanged(); }
         else if (event === "error") { store.appendText(data.message); store.finish(data.degradation_level ?? 5); }
       }, controller.signal);
@@ -54,7 +54,7 @@ export function ChatView({ onChanged }: { onChanged: () => void }) {
       // abort 的效果会当场自我撤销。
       if (error instanceof DOMException && error.name === "AbortError") return;
       store.appendText(`连接中断：${error instanceof Error ? error.message : "未知错误"}`);
-      if (store.conversationId) { const rows = await api<any[]>(`/conversations/${store.conversationId}/messages`).catch(() => []); store.setMessages(rows.map(r => ({ id: r.id, role: r.role, text: r.content.text ?? "", cards: r.content.cards ?? [] }))); }
+      if (store.conversationId) { const rows = await api<any[]>(`/conversations/${store.conversationId}/messages`).catch(() => []); store.setMessages(rows.map(r => ({ id: r.id, role: r.role, text: r.content.text ?? "", cards: r.content.cards ?? [], truncated: r.content.truncated, interrupted: r.status === "interrupted" }))); }
     } finally { setSending(false); abortRef.current = null; }
   }
   return <section className="flex min-w-0 flex-1 flex-col bg-slate-50"><header className="border-b border-slate-200 bg-white px-6 py-4"><h1 className="text-lg font-bold">FitMind AI</h1><p className="text-xs text-slate-500">会记住你的训练目标、偏好与限制</p></header><div className="flex-1 overflow-y-auto p-5"><div className="mx-auto max-w-4xl space-y-6">{store.messages.length === 0 && <div className="py-20 text-center"><h2 className="text-2xl font-bold">今天想练什么？</h2><p className="mt-2 text-slate-500">我能记录训练、规划周期、计算营养，并根据你的场景配餐。</p></div>}{store.messages.map(m => <ChatMessage key={m.id} message={m}/>) }{store.toolStatus && <div className="flex items-center gap-2 text-sm text-blue-600"><LoaderCircle className="animate-spin" size={16}/>{store.toolStatus}</div>}<div ref={end}/></div></div><ChatComposer onSend={send} onStop={stop} sending={sending}/></section>;
