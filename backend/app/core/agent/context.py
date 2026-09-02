@@ -100,8 +100,15 @@ def build_context(
     history: list[dict],
     user_text: str,
     today: str,
+    keep_recent: int = KEEP_RECENT_TURNS,
+    max_history_tokens: int = MAX_HISTORY_TOKENS,
 ) -> tuple[list[dict], ContextBudget]:
-    """组装本轮 messages。顺序即缓存策略，不要随意调整。"""
+    """组装本轮 messages。顺序即缓存策略，不要随意调整。
+
+    keep_recent 默认取模块常量，但调用方应传 settings.agent_history_window
+    ——那个配置项存在、有文档、也能从环境变量读进来，却一直没有被接到这里，
+    改它没有任何效果。这种"看起来能调、实际调不动"的配置比没有更糟。
+    """
     profile_block = _render_profile(profile)
     facts_block = _render_facts(facts)
 
@@ -116,7 +123,7 @@ def build_context(
     messages.append({"role": "system", "content": "\n\n".join(parts)})
 
     # 3 压缩后的历史
-    compressed = compress_history(history, KEEP_RECENT_TURNS, MAX_HISTORY_TOKENS)
+    compressed = compress_history(history, keep_recent, max_history_tokens)
     messages.extend(compressed)
 
     # 4 当前用户消息：永远最后

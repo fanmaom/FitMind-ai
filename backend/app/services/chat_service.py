@@ -33,13 +33,26 @@ FAST_PATH_CARD_TYPE = {
     "log_body_metric": "metric_logged",
 }
 
+# 从库里搬多少条消息进内存的硬上限。
+#
+# 压缩逻辑最终只保留最近 agent_history_window 轮，更早的按 token 预算取舍，
+# 所以取回全部消息是纯浪费——搬运和逐条 token 估算的成本随会话长度线性增长，
+# 用得上的永远只是末尾那一小段。
+#
+# 留出远高于窗口的余量（窗口 6 轮 → 这里 60 条），因为两者的单位不同：
+# 窗口按"轮"算，一轮可能是 user + assistant 两条，工具密集的回合更多；
+# 而且过滤掉空文本消息之后条数还会减少。给足余量，让取舍继续由 token
+# 预算决定，而不是被这道闸提前截断。
+HISTORY_FETCH_LIMIT = 60
+
 
 async def load_history(
     session: AsyncSession,
     conversation_id: uuid.UUID,
     exclude_id: uuid.UUID | None = None,
+    limit: int = HISTORY_FETCH_LIMIT,
 ) -> list[dict]:
-    """取历史对话。
+    """取历史对话，最多 limit 条（取最新的）。
 
     interrupted 与 done 同等纳入：用户已经看见了那半句话，模型也必须看见，
     否则下一轮它会跟屏幕上还挂着的半句自相矛盾。streaming 状态仍排除——
@@ -50,6 +63,12 @@ async def load_history(
     正常取到——而 build_context 末尾还会再拼一次当前消息，结果是同一句话
     在 prompt 里出现两遍。这个 bug 不报错、不影响功能，只表现为白烧 token
     和模型偶尔把用户的话当成说了两遍来回应。
+
+    limit 是数据库层的硬上限，与 compress_history 的 token 预算是两道
+    不同的闸：这里管"从库里搬多少行进内存"，那里管"往 prompt 里放多少"。
+    没有这一道时，一个聊了几百轮的会话每轮都要把全部消息取出来、再逐条
+    估算 token，然后绝大部分被压缩逻辑丢掉——搬运和估算的成本随会话长度
+    线性增长，而真正用得上的永远只有末尾那一小段。
     """
     stmt = select(Message).where(
         Message.conversation_id == conversation_id,
@@ -57,10 +76,19 @@ async def load_history(
     )
     if exclude_id is not None:
         stmt = stmt.where(Message.id != exclude_id)
-    rows = (await session.scalars(stmt.order_by(Message.created_at))).all()
+
+    # 倒序取最新 limit 条，再翻回正序。正序 + LIMIT 会取到最旧的那几条，
+    # 那是完全相反的结果：模型会看到开头几句、看不到刚刚说了什么。
+    #
+    # 排序键是 seq 而不是 created_at：后者在同一事务内的多条消息上完全相同
+    # （now() 返回事务开始时刻），排序结果不确定——助理的回复可能排在用户的
+    # 提问之前。详见 models/message.py。
+    rows = (await session.scalars(
+        stmt.order_by(Message.seq.desc()).limit(limit),
+    )).all()
     return [
         {"role": r.role, "content": r.content.get("text", "")}
-        for r in rows if r.content.get("text")
+        for r in reversed(rows) if r.content.get("text")
     ]
 
 
@@ -190,7 +218,15 @@ async def _run_turn_inner(
     # 历史必须先加载：续问句（「那午饭呢？」）自身没有可检索的实体，
     # 召回要靠它拼上文才能命中。
     # 排除本轮那条 user 消息——它已经落库了，不排除会在 prompt 里出现两遍。
-    history = await load_history(session, conversation_id, exclude_id=user_message.id)
+    #
+    # 取多少条：窗口按"轮"算，一轮至少 user + assistant 两条，所以下限是
+    # 窗口的两倍；同时不低于 HISTORY_FETCH_LIMIT，避免把窗口调小的人顺带
+    # 失去按 token 预算保留更早对话的能力。把窗口调很大时这里跟着放大，
+    # 否则这道闸会变成一个没人知道的隐性截断。
+    fetch_limit = max(HISTORY_FETCH_LIMIT, settings.agent_history_window * 2)
+    history = await load_history(
+        session, conversation_id, exclude_id=user_message.id, limit=fetch_limit,
+    )
     context_query = build_context_query(user_text, history)
     # 两路一起送进去：当前句 + 上文。两路分开而不是拼成一条——拼接会稀释短句里
     # 的关键词，实测反而丢召回（见 core/memory/query.py 的实测表格）。
@@ -205,6 +241,7 @@ async def _run_turn_inner(
         history=history,
         user_text=user_text,
         today=today,
+        keep_recent=settings.agent_history_window,
     )
     logger.info(
         f"上下文预算 total={budget.total} system={budget.system} "

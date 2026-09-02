@@ -59,7 +59,10 @@ async def list_messages(
     rows = await ctx.session.scalars(
         select(Message)
         .where(Message.conversation_id == conversation_id)
-        .order_by(Message.created_at),
+        # 按 seq 而不是 created_at：同一回合的 user 与 assistant 在同一事务
+        # 提交，created_at 完全相同，排序不确定。这个接口是断线重连拉历史用的，
+        # 顺序乱了用户会直接看到回答排在提问前面。详见 models/message.py。
+        .order_by(Message.seq),
     )
     return [{"id": str(r.id), "role": r.role, "content": r.content,
              "status": r.status} for r in rows]
