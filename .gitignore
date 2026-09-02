@@ -8,6 +8,9 @@ dist/
 build/
 .next/
 out/
+*.tsbuildinfo
+# 本地生成的源码压缩包
+*.zip
 
 # 环境变量（.env.example 要提交，.env 绝不提交）
 .env
@@ -33,6 +36,14 @@ coverage/
 # 系统
 .DS_Store
 Thumbs.db
+
+# AI 工具本地产物（next dev 会重新生成 web/AGENTS.md 与 web/CLAUDE.md）
+.codebuddy/
+web/AGENTS.md
+web/CLAUDE.md
+
+# 个人参考素材，非项目资产
+picture/
 
 # Office 临时锁文件
 ~$*

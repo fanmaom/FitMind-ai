@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: fitness
       POSTGRES_DB: fitness
     ports:
-      - "5433:5432"          # 宿主机 5433，避开本机已有的 Postgres
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/10-roles.sql:ro
@@ -23,7 +23,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://fitness_app:fitness@postgres:5432/fitness
     env_file: .env
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,9 +48,10 @@ services:
     build:
       context: ./web
       args:
-        NEXT_PUBLIC_API_BASE: http://localhost:8000/api/v1
+        # Next.js 会在构建时把这个值写进浏览器端代码。
+        NEXT_PUBLIC_API_BASE: ${NEXT_PUBLIC_API_BASE:-http://localhost:8000/api/v1}
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
     depends_on:
       server:
         condition: service_healthy
