@@ -126,6 +126,68 @@ class TestNoInternalIdentifiers:
         assert self._profile_block(self.FULL) == self._profile_block(dict(self.FULL))
 
 
+class TestNoDuplicateCurrentMessage:
+    """本轮的用户消息在调用 build_context 之前就已经落库了（先落库再推流是
+    有意的），所以它会被 load_history 正常取到。不排除的话，同一句话会在
+    prompt 里出现两遍：一次在历史里，一次在末尾。
+
+    这个 bug 不报错也不影响功能，只表现为白烧 token，以及模型偶尔把用户的话
+    当成说了两遍来回应——正是那种能在线上活很久的问题。
+    """
+
+    @pytest.mark.asyncio
+    async def test_current_user_message_excluded_from_history(self, db, seeded_user):
+        from app.models.conversation import Conversation
+        from app.models.message import Message
+        from app.services.chat_service import load_history
+
+        conv = Conversation(user_id=seeded_user, title="t")
+        db.add(conv)
+        await db.flush()
+
+        for text in ("上一轮的问题", "上一轮的回答"):
+            db.add(Message(
+                conversation_id=conv.id, user_id=seeded_user,
+                role="user" if "问题" in text else "assistant",
+                content={"text": text}, status="done",
+            ))
+        current = Message(
+            conversation_id=conv.id, user_id=seeded_user, role="user",
+            content={"text": "本轮的问题"}, status="done",
+        )
+        db.add(current)
+        await db.flush()
+
+        full = await load_history(db, conv.id)
+        assert "本轮的问题" in [m["content"] for m in full]
+
+        trimmed = await load_history(db, conv.id, exclude_id=current.id)
+        assert [m["content"] for m in trimmed] == ["上一轮的问题", "上一轮的回答"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_contains_current_message_exactly_once(self, db, seeded_user):
+        from app.models.conversation import Conversation
+        from app.models.message import Message
+        from app.services.chat_service import load_history
+
+        conv = Conversation(user_id=seeded_user, title="t")
+        db.add(conv)
+        await db.flush()
+        current = Message(
+            conversation_id=conv.id, user_id=seeded_user, role="user",
+            content={"text": "帮我算一下今天的营养素"}, status="done",
+        )
+        db.add(current)
+        await db.flush()
+
+        history = await load_history(db, conv.id, exclude_id=current.id)
+        msgs, _ = build_context(
+            profile={}, facts=[], history=history,
+            user_text="帮我算一下今天的营养素", today="2026-08-25",
+        )
+        assert _joined(msgs).count("帮我算一下今天的营养素") == 1
+
+
 class TestBudget:
     def test_reports_each_segment(self):
         _, budget = build_context(profile=PROFILE, facts=["a", "b"], history=[],

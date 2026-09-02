@@ -176,7 +176,7 @@ PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判�
 |---|---|---|
 | 记忆写入时机 | 回复完成后异步投递，中断的回合不投递 | `services/chat_service.py` |
 | 记忆存储结构 | L1 档案 JSONB / L2 事实 + 向量 / L3 结构化日志 / 待办独立表 | `models/`, `alembic/versions/` |
-| 记忆检索策略 | 距离阈值召回而非纯 top-k；档案全量；日志只走工具 | `core/memory/facts.py` |
+| 记忆检索策略 | 距离阈值召回而非纯 top-k；续问句补一路上文 query；档案全量；日志只走工具 | `core/memory/facts.py`, `core/memory/query.py` |
 | 上下文管理 | 三段式历史压缩 + 缓存友好的 message 排序 | `core/agent/context.py` |
 | Token 控制 | 预算估算 + 历史 token 上限 + 每轮日志记录预算构成 | `core/agent/context.py` |
 | 工具注册与路由 | 装饰器注册表 + JSON Schema 校验 + 快路径绕过模型 | `core/tools/registry.py`, `core/agent/fast_path.py` |
@@ -187,7 +187,7 @@ PostgreSQL 队列，由独立 worker 消费。抽取失败、模型抽风、判�
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 567 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 608 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -227,6 +227,39 @@ CANDIDATE_DISTANCE = 0.45    # 待办判重的候选粗筛门
 只取 top-k 会有个隐蔽问题：没有阈值时，**无关记忆也必然会占满 k 个位置**。
 实测相关事实的余弦距离约 0.31，无关内容从约 0.69 起，中间有明显间隔，
 所以 0.55 能干净切开。
+
+### 续问句的召回：上文作为独立第二路
+
+阈值切得再准也有个前提——query 得有信号。多轮里用户的话天然残缺，
+「那个周三换一天行吗」要跟「每周三晚上固定加班」对上，但"周三"被
+"换一天行吗"稀释，距离 0.576 刚好越过阈值线，召不回。
+
+直觉方案是把上文拼在当前句前面合成一条 query。实测证明这是错的：
+
+| 当前句 | 原句单路 | 拼接单路 | 原句 + 上文双路 |
+|---|---|---|---|
+| 那午饭呢？ | **0.479 ✓** | 0.641 ✗ | **0.479 ✓** |
+| 那有什么不能放的吗 | 0.718 ✗ | 0.685 ✗ | 0.718 ✗ |
+| 这样安排我肩膀受得了吗 | **0.469 ✓** | 0.536 ✓ | **0.469 ✓** |
+| 那个周三换一天行吗 | 0.576 ✗ | **0.455 ✓** | **0.470 ✓** |
+| **命中** | **2/4** | **2/4** | **3/4** |
+
+看第一行：「那午饭呢？」原句 0.479 本来召得回，拼上上文变 0.641 反而召不回。
+短句里关键词的权重占比极高（"午饭"几乎就是整句），掺进上一轮几十个字会把它
+稀释掉。拼接是在用"补充信息"换"信号强度"，而这笔交易并不总划算——它换回
+一个、又赔掉一个，净收益零。
+
+所以上文作为**独立的第二路 query**，取两路最小距离。这样原句那一路始终在，
+**严格不劣于**原来的单路召回：只可能多召回，不可能少召回。这个性质比多命中
+一条更重要——优化召回不该以在别处引入回归为代价，它被钉成
+`test_facts.py::TestMultiQueryRecall::test_adding_query_never_loses_recall`。
+
+两路共用一次批量 embedding 调用，不增加网络往返；只在句子确实依赖上文时
+才开第二路（`core/memory/query.py` 的 `is_referential`），语义自足的句子
+保持单路，避免把无关事实拉进阈值内。
+
+第二行两种方案都救不了（"不能放的"→"不吃香菜"语义跳跃太大），那需要 LLM
+query 改写，而这条召回在用户等回复的主链路上，不适合再插一次同步模型调用。
 
 ### 冲突消解：旧事实不删，用失效指针串联
 
@@ -558,13 +591,13 @@ backend/
       agent/           Agent 循环、上下文组装、快路径、规则兜底、系统提示
       domain/          领域纯函数：能量 营养素 力量 配餐 冲突 推算
       tools/           15 个工具 + 注册表
-      memory/          L1 档案 / L2 事实 / 抽取 / 冲突消解 / embedding
+      memory/          L1 档案 / L2 事实 / 检索 query / 抽取 / 冲突消解 / embedding
       actions/         待办：抽取 / 判重 / 持久化
       jobs/            PostgreSQL 队列与 worker
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    11 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               567 个测试
+  tests/               608 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -623,7 +656,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 567 passed
+make test          # 608 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -636,7 +669,7 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **567 passed** |
+| 后端测试 | **608 passed** |
 | 总覆盖率 | **93%**（2312 statements，154 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |
@@ -646,6 +679,9 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 - `test_rls_isolation.py` — 连接池复用时会话变量不泄露
 - `test_actions.py::TestThresholdGeometry` — 把「向量单独判不了重」的实测结论钉成断言
+- `test_facts.py::TestMultiQueryRecall` — 多路召回「加一路只可能多召回、不可能
+  少召回」的不劣性，以及多路只发一次 embedding 调用
+- `test_context.py::TestNoDuplicateCurrentMessage` — 本轮用户消息不在 prompt 里出现两遍
 - `test_judge.py` — 推理模型返回空输出时的重试行为
 - `test_fallback.py` / `test_rule_fallback.py` — 降级阶梯每一级
 - `test_chat_interrupt.py` — 中断后不投递抽取任务、历史仍包含被中断的半句
@@ -690,6 +726,11 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 - 食物营养值用于产品演示，不替代包装标签、营养师或医疗建议。
 - 余弦距离阈值基于当前 embedding 模型实测调校，**更换模型后必须重新测量**。
   README 里那几个距离数字就是测出来的，换模型后会失效。
+- 续问句的上文补召回只解决"关键词被稀释"那一类。语义跳跃太大的（「那有什么
+  不能放的吗」→「不吃香菜」，实测 0.718）两路都召不回，需要 LLM query 改写；
+  但那要在用户等回复的主链路上多插一次同步模型调用，暂未做。
+- 指代判定是词表规则（`core/memory/query.py`），命中不了的续问句退化成单路
+  召回——与改动前行为一致，不会更差。
 - 待办判重每条候选多一次 LLM 调用，只在向量粗筛命中近邻时发生。
   量大了可以加缓存，目前没做。
 - jobs 队列没有「running 超时自动回收」的看门狗；worker 在执行中硬退出时，

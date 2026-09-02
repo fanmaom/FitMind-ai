@@ -23,6 +23,7 @@ from app.core.jobs.queue import enqueue
 from app.core.logger import logger
 from app.core.memory.facts import recall
 from app.core.memory.profile import load_profile
+from app.core.memory.query import build_context_query
 from app.core.tools.registry import ToolContext, registry
 from app.models.message import Message
 from app.services import interrupt as interrupt_registry
@@ -33,21 +34,30 @@ FAST_PATH_CARD_TYPE = {
 }
 
 
-async def load_history(session: AsyncSession, conversation_id: uuid.UUID) -> list[dict]:
+async def load_history(
+    session: AsyncSession,
+    conversation_id: uuid.UUID,
+    exclude_id: uuid.UUID | None = None,
+) -> list[dict]:
     """取历史对话。
 
     interrupted 与 done 同等纳入：用户已经看见了那半句话，模型也必须看见，
     否则下一轮它会跟屏幕上还挂着的半句自相矛盾。streaming 状态仍排除——
     那是正在写、还没定稿的。
+
+    exclude_id 用来剔除本轮那条 user 消息。它在调用这里之前就已经以
+    status="done" 落库了（先落库再推流是有意的），所以会被上面的筛选条件
+    正常取到——而 build_context 末尾还会再拼一次当前消息，结果是同一句话
+    在 prompt 里出现两遍。这个 bug 不报错、不影响功能，只表现为白烧 token
+    和模型偶尔把用户的话当成说了两遍来回应。
     """
-    rows = (await session.scalars(
-        select(Message)
-        .where(
-            Message.conversation_id == conversation_id,
-            Message.status.in_(("done", "interrupted")),
-        )
-        .order_by(Message.created_at),
-    )).all()
+    stmt = select(Message).where(
+        Message.conversation_id == conversation_id,
+        Message.status.in_(("done", "interrupted")),
+    )
+    if exclude_id is not None:
+        stmt = stmt.where(Message.id != exclude_id)
+    rows = (await session.scalars(stmt.order_by(Message.created_at))).all()
     return [
         {"role": r.role, "content": r.content.get("text", "")}
         for r in rows if r.content.get("text")
@@ -123,10 +133,11 @@ async def _run_turn_inner(
                    "data": {"messageId": str(existing.id), "deduplicated": True}}
             return
 
-    session.add(Message(
+    user_message = Message(
         conversation_id=conversation_id, user_id=user_id, role="user",
         content={"text": user_text}, status="done", client_message_id=client_message_id,
-    ))
+    )
+    session.add(user_message)
     # 助理消息先落库再推流：客户端断连时服务端跑完仍能落盘，
     # 重连是"取回已生成的"而不是"重新生成"
     assistant = Message(
@@ -176,8 +187,18 @@ async def _run_turn_inner(
 
     # 正常路径
     profile = await load_profile(session, user_id)
-    recalled = await recall(session, user_id, user_text, k=5)
-    history = await load_history(session, conversation_id)
+    # 历史必须先加载：续问句（「那午饭呢？」）自身没有可检索的实体，
+    # 召回要靠它拼上文才能命中。
+    # 排除本轮那条 user 消息——它已经落库了，不排除会在 prompt 里出现两遍。
+    history = await load_history(session, conversation_id, exclude_id=user_message.id)
+    context_query = build_context_query(user_text, history)
+    # 两路一起送进去：当前句 + 上文。两路分开而不是拼成一条——拼接会稀释短句里
+    # 的关键词，实测反而丢召回（见 core/memory/query.py 的实测表格）。
+    # 取最小距离等价于"命中任意一路即可"，所以严格不劣于原来的单路召回。
+    queries = [user_text] if context_query is None else [user_text, context_query]
+    recalled = await recall(session, user_id, queries, k=5)
+    if context_query is not None:
+        logger.info(f"续问句启用上文补充检索，共 {len(queries)} 路，召回 {len(recalled)} 条")
     messages, budget = build_context(
         profile=profile,
         facts=[memory.content for memory in recalled],
