@@ -98,6 +98,24 @@ async def _reset_sse_app_status():
 
 
 @pytest_asyncio.fixture(autouse=True)
+async def _reset_judge_caches():
+    """清空判定结果缓存。
+
+    缓存是进程级单例（判定调用实测数秒一次，跨 job 重试复用才有意义），
+    但测试之间必须隔离：不同用例经常用相同的输入文本却期望不同的判定结果，
+    不清就会读到上一个用例的答案。这类污染的表现是"单独跑过、全量跑挂"，
+    很难定位。
+    """
+    from app.core.llm.judge_cache import action_dedupe_cache, fact_reconcile_cache
+
+    action_dedupe_cache.clear()
+    fact_reconcile_cache.clear()
+    yield
+    action_dedupe_cache.clear()
+    fact_reconcile_cache.clear()
+
+
+@pytest_asyncio.fixture(autouse=True)
 async def _disable_chat_memory_network(monkeypatch):
     """普通对话测试不访问真实 embedding 网关。
 

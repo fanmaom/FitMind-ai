@@ -1,5 +1,6 @@
 """事实记忆冲突消解。"""
 
+import hashlib
 import uuid
 from datetime import datetime, timezone
 
@@ -7,6 +8,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.llm.judge import judge_json
+from app.core.llm.judge_cache import fact_reconcile_cache
 from app.core.logger import logger
 from app.core.memory.embedding import embed_texts
 from app.core.memory.facts import insert_fact
@@ -32,11 +34,25 @@ VALID_RELATIONS = {"supersede", "update", "duplicate", "independent"}
 
 
 async def _judge(old_content: str, new_content: str) -> str:
-    parsed = await judge_json(
-        JUDGE_PROMPT.format(old=old_content, new=new_content),
+    """判定两条记忆的关系。结果走缓存——单次判定实测数秒，而 job 退避重试
+    会把同一批抽取出的事实重新消解一遍。
+
+    key 必须保留新旧方向：supersede 的语义是"旧的失效"，把两个方向当成同一个
+    key 会让缓存返回反向结论，导致新记忆被旧记忆顶掉。
+    """
+    raw = f"{old_content}\x00{new_content}".encode()
+
+    async def compute() -> str:
+        parsed = await judge_json(
+            JUDGE_PROMPT.format(old=old_content, new=new_content),
+        )
+        relation = parsed.get("relation", "independent")
+        return relation if relation in VALID_RELATIONS else "independent"
+
+    result = await fact_reconcile_cache.get_or_compute(
+        hashlib.sha256(raw).hexdigest(), compute,
     )
-    relation = parsed.get("relation", "independent")
-    return relation if relation in VALID_RELATIONS else "independent"
+    return str(result)
 
 
 async def _find_similar(

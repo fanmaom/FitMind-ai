@@ -171,15 +171,49 @@ class TestDedupe:
 
     @pytest.mark.asyncio
     async def test_judge_failure_keeps_the_item(
-        self, db, seeded_user, fake_embeddings, monkeypatch,
+        self, db, seeded_user, monkeypatch,
     ):
-        """判定失败不能静默丢建议——用户看不到的东西无法自己纠正。"""
+        """判定失败不能静默丢建议——用户看不到的东西无法自己纠正。
+
+        样本必须是**措辞不同**的两条：逐字相同的会在判定之前就被短路挡掉
+        （见 dedupe.insert_if_new），那条路径不经过 _is_same_task，测不到
+        判定失败的降级行为。
+
+        这里不用 fake_embeddings：它让异文本近正交（距离 1.0），措辞不同的
+        两条根本进不了候选，_is_same_task 压根不会被调到。改成固定同一个
+        向量，强制两条互为候选。
+        """
+        shared = [0.0] * _DIMENSION
+        shared[7] = 1.0
+
+        async def same_vector(_texts: list[str]) -> list[list[float]]:
+            return [list(shared) for _ in _texts]
+
+        monkeypatch.setattr("app.core.actions.store.embed_texts", same_vector)
+
         async def broken(_existing: str, _candidate: str) -> bool:
             raise RuntimeError("网关挂了")
 
         assert await insert_if_new(db, seeded_user, "把卧推加到 82.5kg", "training")
         monkeypatch.setattr("app.core.actions.dedupe._is_same_task", broken)
+        assert await insert_if_new(db, seeded_user, "下周卧推加到 82.5 公斤", "training")
+
+    @pytest.mark.asyncio
+    async def test_verbatim_duplicate_skips_judge(
+        self, db, seeded_user, fake_embeddings, monkeypatch,
+    ):
+        """逐字相同直接判重，不问模型。
+
+        判定单次实测 2.8–4.3 秒，而这种情况在 job 退避重试里很常见——同一条
+        建议被重新抽出来、和上次写进去的那条逐字比对。让用户看到两条完全
+        一样的待办也不是"保守"，那是 bug。
+        """
+        async def exploding(_existing: str, _candidate: str) -> bool:
+            raise AssertionError("逐字相同不该走模型判定")
+
         assert await insert_if_new(db, seeded_user, "把卧推加到 82.5kg", "training")
+        monkeypatch.setattr("app.core.actions.dedupe._is_same_task", exploding)
+        assert await insert_if_new(db, seeded_user, "把卧推加到 82.5kg", "training") is None
 
     @pytest.mark.asyncio
     async def test_unrelated_suggestion_skips_judge_entirely(
