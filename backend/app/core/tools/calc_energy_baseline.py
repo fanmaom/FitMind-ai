@@ -19,6 +19,7 @@ class CalcEnergyBaselineInput(BaseModel):
 
 @tool(
     name="calc_energy_baseline",
+    label="计算热量基线",
     description="根据身高体重年龄性别与活动量，计算基础代谢率(BMR)与每日总消耗(TDEE)。"
                 "任何涉及热量的问题都应先调用本工具拿到基线，不要自行估算。",
     readonly=True,

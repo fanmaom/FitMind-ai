@@ -16,6 +16,7 @@ class GetPlanDetailInput(BaseModel):
 
 @tool(
     name="get_plan_detail",
+    label="查询计划明细",
     description="按 plan_id 查询某一周的计划明细。只返回指定周，避免完整矩阵占满上下文。",
     readonly=True,
 )

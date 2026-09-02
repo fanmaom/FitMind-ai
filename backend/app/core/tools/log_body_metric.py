@@ -20,6 +20,7 @@ class LogBodyMetricInput(BaseModel):
 
 @tool(
     name="log_body_metric",
+    label="记录体重体脂",
     description="记录体重（可选体脂率）。用户报告称重结果时调用。"
                 "同一天同样数值重复调用不会重复写入。",
     readonly=False,

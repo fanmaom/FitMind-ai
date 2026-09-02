@@ -5,6 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 
+from app.core.agent.glossary import enum_label
 from app.core.domain.macros import compute_macros
 from app.core.domain.meal import FoodCandidate, build_meal, distribute_macros
 from app.core.memory.facts import recall
@@ -35,6 +36,7 @@ def _candidate(food: Food, scenario: str) -> FoodCandidate:
 
 @tool(
     name="plan_meals",
+    label="生成场景配餐",
     description="按热量目标和居家、办公室、外食场景生成配餐。会自动读取档案中的忌口和用餐场景。",
     readonly=True,
 )
@@ -67,6 +69,9 @@ async def plan_meals(inp: PlanMealsInput, ctx: ToolContext) -> dict:
     }
     return {
         "scenario": scenario, "meal_count": len(plans),
-        "summary": f"已按 {scenario} 场景生成 {len(plans)} 餐，并自动避开 {len(dislikes)} 项忌口。",
+        # summary 会被模型照抄给用户，所以句子里用人话；scenario 字段保持原始
+        # 枚举值，前端卡片按它渲染。
+        "summary": f"已按“{enum_label(scenario)}”场景生成 {len(plans)} 餐，"
+                   f"并自动避开 {len(dislikes)} 项忌口。",
         "__card__": {"type": "meal_plan", "payload": payload},
     }

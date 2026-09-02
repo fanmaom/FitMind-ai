@@ -1,14 +1,12 @@
 """事实记忆冲突消解。"""
 
-import json
 import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.llm.client import ChatRequest
-from app.core.llm.factory import build_provider
+from app.core.llm.judge import judge_json
 from app.core.logger import logger
 from app.core.memory.embedding import embed_texts
 from app.core.memory.facts import insert_fact
@@ -34,23 +32,10 @@ VALID_RELATIONS = {"supersede", "update", "duplicate", "independent"}
 
 
 async def _judge(old_content: str, new_content: str) -> str:
-    provider = build_provider()
-    parts: list[str] = []
-    async for chunk in provider.stream(ChatRequest(
-        messages=[{
-            "role": "user",
-            "content": JUDGE_PROMPT.format(old=old_content, new=new_content),
-        }],
-        max_tokens=64,
-    )):
-        if chunk.text_delta:
-            parts.append(chunk.text_delta)
-
-    text = "".join(parts).strip()
-    if text.startswith("```"):
-        fenced = text.split("```")
-        text = fenced[1].removeprefix("json").strip() if len(fenced) > 1 else ""
-    relation = json.loads(text).get("relation", "independent")
+    parsed = await judge_json(
+        JUDGE_PROMPT.format(old=old_content, new=new_content),
+    )
+    relation = parsed.get("relation", "independent")
     return relation if relation in VALID_RELATIONS else "independent"
 
 

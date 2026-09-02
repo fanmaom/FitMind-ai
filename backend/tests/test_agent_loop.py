@@ -169,6 +169,160 @@ class TestToolCalls:
         assert events[-1].type == "done"
 
 
+class TestFailureFeedbackDoesNotInviteLeaks:
+    """失败反馈会原样进模型上下文，模型很容易把它整句转述给用户。
+    所以反馈里说的是工具的用户可见说法，而且明写"别转述"。"""
+
+    @pytest.mark.asyncio
+    async def test_timeout_feedback_uses_label_not_internal_name(self, monkeypatch):
+        import asyncio
+
+        from app.core.tools import registry as reg_mod
+
+        async def slow_invoke(name, args, ctx):
+            await asyncio.sleep(10)
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", slow_invoke)
+
+        p = ScriptedProvider([
+            [ChatChunk(tool_calls=[ToolCall(id="c", name="log_workout", arguments={})],
+                       finish_reason="tool_calls")],
+            [ChatChunk(text_delta="换个方式"), ChatChunk(finish_reason="stop")],
+        ])
+        events = await _drain(_loop(p, tool_timeout_s=0.05))
+
+        summary = next(e for e in events if e.type == "tool_result").data["summary"]
+        assert "记录训练" in summary
+        assert "log_workout" not in summary
+        assert "不要" in summary, "没提醒模型别转述，它就会转述"
+
+    @pytest.mark.asyncio
+    async def test_exception_feedback_uses_label(self, monkeypatch):
+        from app.core.tools import registry as reg_mod
+
+        async def boom(name, args, ctx):
+            raise RuntimeError("数据库连接断了")
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", boom)
+
+        p = ScriptedProvider([
+            [ChatChunk(tool_calls=[ToolCall(id="c", name="plan_meals", arguments={})],
+                       finish_reason="tool_calls")],
+            [ChatChunk(text_delta="稍后再试"), ChatChunk(finish_reason="stop")],
+        ])
+        events = await _drain(_loop(p))
+
+        summary = next(e for e in events if e.type == "tool_result").data["summary"]
+        assert "生成场景配餐" in summary
+        assert "plan_meals" not in summary
+
+    @pytest.mark.asyncio
+    async def test_unknown_tool_keeps_the_hallucinated_name(self, monkeypatch):
+        """模型编了个工具名时反过来——必须点出它编的那个名字，否则它改不过来。
+        这条反馈不会到用户眼前：脱敏层拦在输出侧。"""
+        from app.core.tools import registry as reg_mod
+        from app.core.tools.registry import ToolNotFoundError
+
+        async def missing(name, args, ctx):
+            raise ToolNotFoundError(f"未注册的工具：{name}")
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", missing)
+
+        p = ScriptedProvider([
+            [ChatChunk(tool_calls=[ToolCall(id="c", name="set_reminder", arguments={})],
+                       finish_reason="tool_calls")],
+            [ChatChunk(text_delta="这个我做不到"), ChatChunk(finish_reason="stop")],
+        ])
+        events = await _drain(_loop(p))
+        summary = next(e for e in events if e.type == "tool_result").data["summary"]
+        assert "set_reminder" in summary
+
+    @pytest.mark.asyncio
+    async def test_tool_start_carries_label(self, monkeypatch):
+        """前端状态行只能拿 label——拿到 name 就会显示"正在调用 plan_meals…"。"""
+        from app.core.tools import registry as reg_mod
+
+        async def ok(name, args, ctx):
+            return {"ok": True}
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", ok)
+
+        p = ScriptedProvider([
+            [ChatChunk(tool_calls=[ToolCall(id="c", name="search_food", arguments={})],
+                       finish_reason="tool_calls")],
+            [ChatChunk(text_delta="查到了"), ChatChunk(finish_reason="stop")],
+        ])
+        events = await _drain(_loop(p))
+        start = next(e for e in events if e.type == "tool_start")
+        assert start.data["label"] == "查询食物营养"
+
+
+class TestReasoningModelEmptyOutput:
+    """线上真实故障：工具跑完（档案确实写进去了），回答却停在"先把你的档案建好"。
+
+    原因是 hy3 把 max_tokens 全烧在思考上——实测工具结果回灌那一轮
+    reasoning_tokens=2048/2048，正文 0 字，finish_reason=length，HTTP 200。
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_turn_after_tools_is_retried_not_swallowed(self, monkeypatch):
+        from app.core.tools import registry as reg_mod
+
+        async def fake_invoke(name, args, ctx):
+            return {"bmr": 2028.0, "tdee": 3143.4}
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", fake_invoke)
+
+        p = ScriptedProvider([
+            # 第 1 轮：一句铺垫 + 调工具
+            [ChatChunk(text_delta="先把你的档案建好，同时算出你的代谢基线。"),
+             ChatChunk(tool_calls=[ToolCall(id="c1", name="calc_energy_baseline", arguments={})],
+                       finish_reason="tool_calls")],
+            # 第 2 轮：思考预算烧光，正文空
+            [ChatChunk(finish_reason="length", usage={"completion_tokens": 2048})],
+            # 重试：正常出结果
+            [ChatChunk(text_delta="基础代谢 2028 kcal，每日总消耗 3143 kcal。"),
+             ChatChunk(finish_reason="stop")],
+        ])
+        events = await _drain(_loop(p))
+
+        text = "".join(e.data["text"] for e in events if e.type == "text")
+        assert "3143" in text, "空输出被当成说完了，用户拿不到结果"
+        assert events[-1].type == "done"
+        assert events[-1].data["degradation_level"] == 1, "重试过就该记为 L1"
+
+    @pytest.mark.asyncio
+    async def test_persistent_empty_output_degrades_instead_of_stopping_silently(self):
+        """一直空就走 L4/L5：给个说法，而不是让用户对着半句话点重试。"""
+        p = ScriptedProvider([[ChatChunk(finish_reason="length")]])
+        events = await _drain(_loop(p), messages=[], profile={}, user_text="讲个笑话")
+        assert events[-1].type == "error"
+        assert events[-1].data["degradation_level"] == 5
+
+    @pytest.mark.asyncio
+    async def test_request_carries_the_configured_output_budget(self):
+        """2048 不够这个模型思考完再说话，预算必须能配、且默认给够。"""
+        from app.core.llm.client import DEFAULT_MAX_TOKENS
+
+        seen: list[int] = []
+
+        class Recording(ScriptedProvider):
+            async def stream(self, req):
+                seen.append(req.max_tokens)
+                async for chunk in super().stream(req):
+                    yield chunk
+
+        p = Recording([[ChatChunk(text_delta="好"), ChatChunk(finish_reason="stop")]])
+        await _drain(_loop(p, max_output_tokens=6000))
+        assert seen == [6000]
+
+        p2 = Recording([[ChatChunk(text_delta="好"), ChatChunk(finish_reason="stop")]])
+        seen.clear()
+        await _drain(_loop(p2))
+        assert seen == [DEFAULT_MAX_TOKENS]
+        assert DEFAULT_MAX_TOKENS >= 4096, "推理模型光思考就要两千多 token"
+
+
 class TestLoopBounds:
     @pytest.mark.asyncio
     async def test_max_turns_truncates_instead_of_looping_forever(self, monkeypatch):

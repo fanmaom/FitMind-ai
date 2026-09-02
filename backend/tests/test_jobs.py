@@ -163,8 +163,10 @@ class TestChatEnqueue:
         bind_rls_user(session, user_id)
         try:
             jobs = (await session.scalars(select(Job))).all()
-            assert len(jobs) == 1
-            assert jobs[0].type == "extract_memory"
-            assert "我不吃香菜" in jobs[0].payload["conversation_text"]
+            # 事实抽取与待办抽取分两个任务投递，判据相反且需要各自独立重试。
+            by_type = {job.type: job for job in jobs}
+            assert set(by_type) == {"extract_memory", "extract_actions"}
+            for job in jobs:
+                assert "我不吃香菜" in job.payload["conversation_text"]
         finally:
             await session.close()

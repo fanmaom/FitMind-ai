@@ -17,6 +17,7 @@ class CheckPlanConflictInput(BaseModel):
 
 @tool(
     name="check_plan_conflict",
+    label="检查目标冲突",
     description="用户同时提出多个目标，或新目标可能与当前减脂/增肌周期冲突时主动调用。自动读取当前周期。",
     readonly=True,
 )

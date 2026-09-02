@@ -4,10 +4,11 @@
 前面变一个字节，后面全部失效。
 """
 
-import json
 from dataclasses import dataclass
 
+from app.core.agent.glossary import prompt_label, render_value
 from app.core.agent.prompts import SYSTEM_PROMPT
+from app.core.memory.profile import PROFILE_FIELDS
 
 MAX_HISTORY_TOKENS = 3000
 KEEP_RECENT_TURNS = 6
@@ -34,11 +35,28 @@ def estimate_tokens(text: str) -> int:
 
 
 def _render_profile(profile: dict) -> str:
+    """把档案渲染成人话。
+
+    不用 JSON dump：那样注入的是 weight_kg / cut / office 这类内部标识符，
+    而模型会把提示里看到的写法照抄进回复——线上出现过"周中日间 office、其余 cook"。
+    模型手上没有内部名字，就抄不出来。
+
+    顺序按 PROFILE_FIELDS 的定义顺序，与 dict 插入顺序无关：档案每轮注入提示，
+    渲染不稳定会打断缓存前缀，而且没有任何报错，只体现为账单偏高。
+    """
     if not profile:
         return "用户档案：暂无。首次对话请引导用户补充身高、体重、目标。"
-    return "用户档案（每轮自动注入，无需重复询问）：\n" + json.dumps(
-        profile, ensure_ascii=False, sort_keys=True, indent=2,
-    )
+
+    lines = [
+        f"- {prompt_label(key)}：{render_value(profile[key])}"
+        for key in PROFILE_FIELDS if key in profile
+    ]
+    # 白名单之外的键正常不该存在（写入经过 validate_fields），留个兜底不丢信息。
+    lines += [
+        f"- {key}：{render_value(profile[key])}"
+        for key in sorted(k for k in profile if k not in PROFILE_FIELDS)
+    ]
+    return "用户档案（每轮自动注入，无需重复询问）：\n" + "\n".join(lines)
 
 
 def _render_facts(facts: list[str]) -> str:

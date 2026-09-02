@@ -43,6 +43,7 @@ class ToolContext:
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
+    label: str
     description: str
     input_model: type[BaseModel]
     handler: Callable[..., Awaitable[Any]]
@@ -54,6 +55,7 @@ def tool(
     name: str,
     description: str,
     *,
+    label: str,
     readonly: bool = False,
     needs_confirm: bool = False,
 ):
@@ -61,11 +63,19 @@ def tool(
 
     签名必须是 `async def fn(inp: SomePydanticModel, ctx: ToolContext)`。
 
+    label 是这个工具的**用户可见**说法，必填。name 是内部标识符，任何会被用户
+    看到的地方（前端状态行、失败反馈、流式脱敏）都只能用 label——线上出现过
+    "用 `plan_strength_cycle` 帮你排" 这种回复，就是因为当时没有 label 可用。
+    动词短语，前端会拼成"正在{label}…"。
+
     readonly 默认 False：漏标时按写操作对待，宁可保守——降级层据此决定
     能否安全重试，误判成只读会导致重复写入。
     """
 
     def decorator(fn: Callable[..., Awaitable[Any]]):
+        if not label.strip():
+            raise TypeError(f"工具 {name} 必须提供非空 label（用户可见的说法）")
+
         params = list(inspect.signature(fn).parameters)
         if not params:
             raise TypeError(f"工具 {name} 必须接受 (inp, ctx) 两个参数，当前没有参数")
@@ -80,6 +90,7 @@ def tool(
 
         fn.__tool_spec__ = ToolSpec(  # type: ignore[attr-defined]
             name=name,
+            label=label,
             description=description,
             input_model=input_model,
             handler=fn,
@@ -116,6 +127,12 @@ class ToolRegistry:
         if name not in self._specs:
             raise ToolNotFoundError(f"未注册的工具：{name}")
         return self._specs[name]
+
+    def label_of(self, name: str) -> str:
+        """用户可见的说法。未注册时返回原名——那说明模型编了个工具名，
+        这种情况下反馈文本里必须点出它编的那个名字，否则它改不过来。"""
+        spec = self._specs.get(name)
+        return spec.label if spec else name
 
     def all(self) -> list[ToolSpec]:
         # 按 name 排序。顺序不稳定会让 prompt 前缀字节每次不同，

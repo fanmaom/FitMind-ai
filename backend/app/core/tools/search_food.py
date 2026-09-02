@@ -14,6 +14,7 @@ class SearchFoodInput(BaseModel):
 
 @tool(
     name="search_food",
+    label="查询食物营养",
     description="查询食物每 100g 的热量和三大营养素。用户询问某种食物营养、热量或配餐选材时调用。",
     readonly=True,
 )

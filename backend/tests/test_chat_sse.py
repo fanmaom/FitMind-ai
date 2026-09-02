@@ -130,6 +130,120 @@ class TestPersistence:
                 await session.close()
 
 
+class TestNoInternalNamesReachTheUser:
+    """线上出过这样的回复：「用 `plan_strength_cycle` 或下肢保护性安排」。
+    系统提示已经禁止这么说，但提示只是要求——这里验的是确定性的那一层。"""
+
+    @pytest.mark.asyncio
+    async def test_leaked_identifiers_are_scrubbed_in_stream_and_in_db(self, monkeypatch):
+        import app.services.chat_service as svc
+        from app.core.llm.client import ChatChunk, ChatRequest
+
+        class LeakyProvider:
+            model = "leaky"
+
+            async def stream(self, req: ChatRequest):
+                # 故意在标识符中间切断：真实流式就是这么来的
+                for piece in ["我可以用 `plan_st", "rength_cycle` 帮你排",
+                              "，另外 weight_kg 也要补"]:
+                    yield ChatChunk(text_delta=piece)
+                yield ChatChunk(finish_reason="stop")
+
+        monkeypatch.setattr(svc, "build_provider", lambda *a, **k: LeakyProvider())
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = await _auth(client, "leak")
+            conv = await _new_conversation(client, headers)
+
+            r = await client.post(f"/api/v1/conversations/{conv}/messages",
+                                  headers=headers, json={"text": "帮我安排一下训练"})
+            streamed = "".join(d["text"] for n, d in _parse_sse(r.text) if n == "text_delta")
+
+            assert "plan_strength_cycle" not in streamed
+            assert "weight_kg" not in streamed
+            assert "编排增力周期" in streamed
+            assert "另外" in streamed, "脱敏不能把话吞掉"
+
+            # 落库的也必须是脱敏后的：重连要取回它，下一轮还要当历史喂回模型
+            msgs = (await client.get(f"/api/v1/conversations/{conv}/messages",
+                                     headers=headers)).json()
+            stored = msgs[1]["content"]["text"]
+            assert "plan_strength_cycle" not in stored
+            assert stored == streamed, "流出去的和落库的不是同一段文字"
+
+    @pytest.mark.asyncio
+    async def test_identifier_at_the_very_end_is_not_swallowed(self, monkeypatch):
+        """脱敏靠扣住结尾等边界，忘了 flush 就会吞掉最后一段。"""
+        import app.services.chat_service as svc
+        from app.core.llm.client import ChatChunk, ChatRequest
+
+        class TailProvider:
+            model = "tail"
+
+            async def stream(self, req: ChatRequest):
+                yield ChatChunk(text_delta="这条得用 log_workout")
+                yield ChatChunk(finish_reason="stop")
+
+        monkeypatch.setattr(svc, "build_provider", lambda *a, **k: TailProvider())
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = await _auth(client, "tail")
+            conv = await _new_conversation(client, headers)
+            r = await client.post(f"/api/v1/conversations/{conv}/messages",
+                                  headers=headers, json={"text": "帮我安排一下训练"})
+            streamed = "".join(d["text"] for n, d in _parse_sse(r.text) if n == "text_delta")
+            assert streamed == "这条得用 「记录训练」"
+
+    @pytest.mark.asyncio
+    async def test_tool_events_carry_label_only(self, monkeypatch):
+        """前端状态行的数据源。给了 name 就会显示"正在调用 plan_meals…"；
+        给了 input 就等于把参数（也是内部字段名）一起送到浏览器。"""
+        import app.services.chat_service as svc
+        from app.core.llm.client import ChatChunk, ChatRequest, ToolCall
+        from app.core.tools import registry as reg_mod
+
+        async def fake_invoke(name, args, ctx):
+            return {"kcal": 2100}
+
+        monkeypatch.setattr(reg_mod.registry, "invoke", fake_invoke)
+
+        class ToolThenTalk:
+            model = "tool"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            async def stream(self, req: ChatRequest):
+                self.calls += 1
+                if self.calls == 1:
+                    yield ChatChunk(
+                        tool_calls=[ToolCall(id="c1", name="calc_macros",
+                                             arguments={"tdee": 2600, "weight_kg": 82})],
+                        finish_reason="tool_calls",
+                    )
+                else:
+                    yield ChatChunk(text_delta="每天 2100 大卡")
+                    yield ChatChunk(finish_reason="stop")
+
+        provider = ToolThenTalk()
+        monkeypatch.setattr(svc, "build_provider", lambda *a, **k: provider)
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = await _auth(client, "toolwire")
+            conv = await _new_conversation(client, headers)
+            r = await client.post(f"/api/v1/conversations/{conv}/messages",
+                                  headers=headers, json={"text": "我该吃多少蛋白"})
+
+            events = _parse_sse(r.text)
+            start = next(d for n, d in events if n == "tool_start")
+            assert start == {"label": "计算营养素分配"}
+            assert "calc_macros" not in r.text, "内部工具名出现在了 SSE 报文里"
+            assert "tdee" not in r.text, "工具参数出现在了 SSE 报文里"
+
+
 class TestIdempotency:
     @pytest.mark.asyncio
     async def test_duplicate_client_message_id(self, monkeypatch):
@@ -184,6 +298,56 @@ class TestIsolation:
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
             assert (await client.post("/api/v1/conversations")).status_code == 401
+
+
+class TestInterruptEndpoint:
+    @pytest.mark.asyncio
+    async def test_sets_the_flag_for_that_conversation(self):
+        from app.services import interrupt
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = await _auth(client, "int-flag")
+            conv = await _new_conversation(client, headers)
+
+            r = await client.post(f"/api/v1/conversations/{conv}/interrupt", headers=headers)
+            assert r.status_code == 204, r.text
+            try:
+                assert interrupt.is_requested(uuid.UUID(conv)) is True
+            finally:
+                interrupt.clear(uuid.UUID(conv))
+
+    @pytest.mark.asyncio
+    async def test_cannot_interrupt_another_users_conversation(self):
+        """否则任何人都能掐断别人正在生成的回复。"""
+        from app.services import interrupt
+
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers_a = await _auth(client, "int-a")
+            headers_b = await _auth(client, "int-b")
+            conv = await _new_conversation(client, headers_a)
+
+            r = await client.post(f"/api/v1/conversations/{conv}/interrupt", headers=headers_b)
+            assert r.status_code == 404, "B 不该能中断 A 的会话"
+            assert interrupt.is_requested(uuid.UUID(conv)) is False, "404 了还是插了旗"
+
+    @pytest.mark.asyncio
+    async def test_nonexistent_conversation_is_404(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            headers = await _auth(client, "int-404")
+            r = await client.post(
+                f"/api/v1/conversations/{uuid.uuid4()}/interrupt", headers=headers,
+            )
+            assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_unauthenticated_rejected(self):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            r = await client.post(f"/api/v1/conversations/{uuid.uuid4()}/interrupt")
+            assert r.status_code == 401
 
 
 class TestDegradedPath:

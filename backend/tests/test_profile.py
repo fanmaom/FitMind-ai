@@ -149,6 +149,22 @@ class TestConfirmationSemantics:
         assert "用户说想瘦" in out["confirmation_prompt"]
 
     @pytest.mark.asyncio
+    async def test_confirmation_prompt_has_no_internal_identifiers(self, db, seeded_user):
+        """这句话是照着念给用户的。带上字段说明就会变成
+        「要我记下当前目标：cut 减脂 / bulk 增肌 / maintain 维持：'cut' 吗？」。"""
+        ctx = ToolContext(user_id=seeded_user, session=db)
+        out = await registry.invoke("update_profile", {
+            "updates": {"goal": "cut", "target_kg": 75.0}, "confirmed": False,
+        }, ctx=ctx)
+
+        prompt = out["confirmation_prompt"]
+        for raw in ("goal", "target_kg", "cut", "bulk", "maintain"):
+            assert raw not in prompt, f"征询语里出现内部标识符 {raw}"
+        assert "当前目标" in prompt
+        assert "减脂" in prompt
+        assert "75" in prompt, "值本身不能丢，否则用户不知道在确认什么"
+
+    @pytest.mark.asyncio
     async def test_unknown_field_rejected_by_tool(self, db, seeded_user):
         from app.core.tools.registry import ToolValidationError
 

@@ -11,6 +11,7 @@
 import re
 from dataclasses import dataclass
 
+from app.core.agent.glossary import field_label
 from app.core.domain.energy import calc_bmr, calc_tdee
 from app.core.domain.macros import compute_macros
 from app.core.domain.projection import project_weight_goal
@@ -47,7 +48,12 @@ def _hits(text: str, patterns: list[str]) -> bool:
 
 
 def _missing(profile: dict, required: tuple[str, ...]) -> list[str]:
-    return [k for k in required if profile.get(k) is None]
+    """缺哪些字段——返回中文名。
+
+    这句文案是直接给用户看的："缺少 age、sex" 用户根本不知道该补什么，
+    而且那是内部字段名，不该出现在回复里。
+    """
+    return [field_label(k) for k in required if profile.get(k) is None]
 
 
 def _macro_answer(profile: dict) -> RuleAnswer:

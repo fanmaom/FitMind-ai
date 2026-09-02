@@ -13,6 +13,7 @@ class EstimateOneRmInput(BaseModel):
 
 @tool(
     name="estimate_1rm",
+    label="估算极限重量",
     description="用 Epley 公式由一组次极限训练估算单次最大重量(1RM)。"
                 "排增力计划前需要 1RM 而用户只报了某组重量次数时调用。",
     readonly=True,

@@ -37,6 +37,7 @@ def _serialize_week(plan: WeekPlan) -> dict:
 
 @tool(
     name="plan_strength_cycle",
+    label="编排增力周期",
     description=(
         "生成增力周期计划。入参是各动作当前 1RM、周期长度、递增方案。"
         "返回摘要与 plan_id，完整周表已存库并推送到前端卡片；"

@@ -35,12 +35,24 @@ class ChatChunk:
     usage: dict | None = None
 
 
+# 输出预算。推理模型会先烧思考 token，**思考也算在 max_tokens 里**，给小了
+# 不是截断而是正文全空（finish_reason=length，HTTP 200，没有任何报错）。
+#
+# 实测当前配置的 hy3，在"工具结果回灌"那一轮：
+#     max_tokens=2048 → reasoning_tokens 2048/2048，正文 0 字
+#     max_tokens=8192 → reasoning_tokens 2123，正文正常，继续调工具
+#
+# 所以下限由"思考长度"决定，而不是"回答多长"。这是个上限而非用量，
+# 调大不会多花钱。可用 LLM_MAX_TOKENS 覆盖。
+DEFAULT_MAX_TOKENS = 8192
+
+
 @dataclass
 class ChatRequest:
     messages: list[dict]
     tools: list[dict] = field(default_factory=list)
     model: str = ""
-    max_tokens: int = 2048
+    max_tokens: int = DEFAULT_MAX_TOKENS
 
 
 class LLMProvider(Protocol):

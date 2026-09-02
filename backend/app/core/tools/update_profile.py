@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, Field
 
+from app.core.agent.glossary import field_label, render_value
 from app.core.memory.profile import (
     PROFILE_FIELDS,
     SENSITIVE_FIELDS,
@@ -27,6 +28,7 @@ class UpdateProfileInput(BaseModel):
 
 @tool(
     name="update_profile",
+    label="更新档案",
     description=(
         "更新用户档案（身高体重、目标、伤病、器械、忌口等）。"
         "用户明确告知信息时置 confirmed=true；推断信息置 false，"
@@ -39,8 +41,11 @@ async def update_profile(inp: UpdateProfileInput, ctx: ToolContext) -> dict:
 
     touched_sensitive = set(inp.updates) & SENSITIVE_FIELDS
     if touched_sensitive and not inp.confirmed:
+        # 这句话是照着念给用户的：字段用中文名（PROFILE_FIELDS 的原文带取值域，
+        # 会念出 "当前目标：cut 减脂 / bulk 增肌"），值也翻译成人话。
         described = "、".join(
-            f"{PROFILE_FIELDS[key]}：{value!r}" for key, value in inp.updates.items()
+            f"{field_label(key)}：{render_value(value)}"
+            for key, value in sorted(inp.updates.items())
         )
         prompt = (
             f"要我记下{described}吗？"

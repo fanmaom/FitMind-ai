@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.llm.client import ChatRequest
+from app.core.config import get_settings
+from app.core.llm.client import ChatRequest, LLMError
 from app.core.llm.factory import build_provider
 from app.core.logger import logger
 from app.core.memory.reconcile import reconcile_fact
@@ -82,11 +83,19 @@ async def extract_facts(conversation_text: str) -> list[ExtractedFact]:
             "role": "user",
             "content": EXTRACT_PROMPT.format(conversation=conversation_text),
         }],
-        max_tokens=1024,
+        # 预算跟着配置走。写死 1024 的后果不是截断，而是推理模型把预算全烧在
+        # 思考上、正文一个字都没有——抽取悄悄退化成"从不记忆"。
+        max_tokens=get_settings().llm_max_tokens,
     )):
         if chunk.text_delta:
             chunks.append(chunk.text_delta)
-    return _parse("".join(chunks))
+
+    raw = "".join(chunks)
+    if not raw.strip():
+        # 空输出和"[]"（确实没有可记的）必须分开：前者是失败，抛出去让任务队列
+        # 按退避重试；当成后者处理，记忆功能会静默失效且没有任何报错。
+        raise LLMError("事实抽取返回空输出（多半是思考预算耗尽），交给任务队列重试")
+    return _parse(raw)
 
 
 async def handle_extract_memory(session: AsyncSession, payload: dict) -> None:

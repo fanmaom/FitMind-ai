@@ -17,6 +17,7 @@ class ProjectGoalInput(BaseModel):
 
 @tool(
     name="project_goal",
+    label="推算目标进度",
     description="按每周热量差推算到达目标体重需要多少天，并检查方向是否正确、"
                 "速度是否过快。用户问「多久能到」「还要多久」时调用。",
     readonly=True,

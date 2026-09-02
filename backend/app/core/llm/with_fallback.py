@@ -32,8 +32,20 @@ class FallbackProvider:
     async def _attempt(
         self, provider: LLMProvider, req: ChatRequest, level: int,
     ) -> AsyncIterator[tuple[ChatChunk, int]]:
+        produced = False
         async for chunk in provider.stream(req):
+            if chunk.text_delta or chunk.tool_calls:
+                produced = True
             yield chunk, level
+
+        if not produced:
+            # 推理模型把 max_tokens 全烧在思考上时，返回的是 HTTP 200 + 空正文
+            # （finish_reason=length），不是报错。当成"这轮说完了"的后果是用户
+            # 看到工具跑完了、却没有任何结论——比报错更难查。
+            #
+            # 这里抛出去是安全的：既然一个字、一个工具调用都没产出，下游还没
+            # 拿到任何内容，重试不会重复输出。
+            raise LLMError("模型返回空输出（多半是思考预算耗尽），本次尝试作废")
 
     def _shrink(self, req: ChatRequest) -> ChatRequest | None:
         """砍到核心工具集。已经足够精简时返回 None，避免白跑一次。"""

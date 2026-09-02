@@ -15,6 +15,7 @@ class CalcMacrosInput(BaseModel):
 
 @tool(
     name="calc_macros",
+    label="计算营养素分配",
     description="根据 TDEE 和目标计算每日热量与蛋白质、碳水、脂肪的克数分配。"
                 "涉及「该吃多少」的问题必须调用本工具，不要口算。",
     readonly=True,

@@ -26,6 +26,7 @@ def _daily_schedule(carb_g: float, carb_cycle: bool) -> list[dict]:
 
 @tool(
     name="plan_cut_phase",
+    label="编排减脂周期",
     description="生成减脂周期与可选碳循环。用户要完整减脂安排时调用；返回摘要和 plan_id，明细放前端卡片。",
     readonly=False,
 )

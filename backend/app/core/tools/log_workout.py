@@ -26,6 +26,7 @@ class LogWorkoutInput(BaseModel):
 
 @tool(
     name="log_workout",
+    label="记录训练",
     description="记录一次训练的动作、重量与组数。用户描述了具体训练内容时调用。"
                 "同一天同一动作同样内容重复调用不会重复写入。",
     readonly=False,

@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.llm.client import DEFAULT_MAX_TOKENS
+
 # 相对 __file__ 解析而非 CWD——否则从 backend/ 还是仓库根启动会得到不同结果。
 # 两个位置都找，靠后的优先：仓库根的 .env 同时被 docker compose 的 env_file 使用。
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -37,6 +39,9 @@ class Settings(BaseSettings):
     llm_api_key: str = Field(description="模型服务 API Key")
     llm_model: str = "gpt-4o-mini"
     llm_fallback_model: str = ""
+    # 单次调用的输出上限。推理模型的思考 token 也算在里面，给小了正文会整段为空
+    # （见 core/llm/client.py 里的实测数据）。上限不是用量，调大不多花钱。
+    llm_max_tokens: int = DEFAULT_MAX_TOKENS
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
 

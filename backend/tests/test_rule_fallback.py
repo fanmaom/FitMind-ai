@@ -86,8 +86,14 @@ class TestIncompleteProfile:
 
     def test_lists_which_fields_are_missing(self):
         r = try_rule_fallback("算一下我该吃多少", {"weight_kg": 80, "height_cm": 178})
-        for field in ("age", "sex", "activity", "goal"):
-            assert field in r.text
+        for label in ("年龄", "生理性别", "日常活动量", "当前目标"):
+            assert label in r.text
+
+    def test_never_shows_internal_field_names(self):
+        """降级文案是直接给用户看的，"缺少 age、sex" 用户根本不知道该补什么。"""
+        r = try_rule_fallback("算一下我该吃多少", {"weight_kg": 80})
+        for key in ("age", "sex", "activity", "goal", "height_cm", "weight_kg"):
+            assert key not in r.text, f"降级文案里出现内部字段名 {key}"
 
     def test_empty_profile_does_not_crash(self):
         assert try_rule_fallback("该吃多少", {}).matched is True

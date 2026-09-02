@@ -15,6 +15,7 @@ class QueryBodyTrendInput(BaseModel):
 
 @tool(
     name="query_body_trend",
+    label="查询体重趋势",
     description="查询体重变化趋势，返回起止体重、总变化、周均变化率。"
                 "回答「我掉了多少」「进度怎么样」时调用。",
     readonly=True,

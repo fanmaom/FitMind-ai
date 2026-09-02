@@ -79,3 +79,51 @@ class TestHandle:
     async def test_bad_payload_is_not_silently_accepted(self, db):
         with pytest.raises((KeyError, ValueError)):
             await handle_extract_memory(db, {"conversation_text": "缺 user_id"})
+
+
+class TestEmptyOutputIsNotSilentlyAccepted:
+    """推理模型思考预算耗尽时返回**空正文**（HTTP 200，finish_reason=length）。
+
+    当成"这轮没有事实"处理，记忆功能就悄悄退化成"从不记忆"：任务标记 done、
+    库里 0 条、没有任何报错。线上就是这样——3 个抽取任务全部 done，
+    memories 表 0 行。
+
+    实测同一段真实对话：max_tokens=1024 → 正文 0 字 / 0 条事实；
+    8192 → 457 字 / 5 条事实。
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_output_raises_so_the_job_retries(self, monkeypatch):
+        import app.core.memory.extractor as module
+        from app.core.llm.client import ChatChunk, LLMError
+
+        class Silent:
+            async def stream(self, _request):
+                yield ChatChunk(finish_reason="length")
+
+        monkeypatch.setattr(module, "build_provider", lambda: Silent())
+        with pytest.raises(LLMError):
+            await extract_facts("用户：我身高181，体重92")
+
+    @pytest.mark.asyncio
+    async def test_uses_the_configured_output_budget(self, monkeypatch):
+        """1024 不够这个模型思考完再输出 JSON。预算必须跟着配置走。"""
+        import app.core.memory.extractor as module
+        from app.core.config import get_settings
+        from app.core.llm.client import ChatChunk
+
+        seen: list[int] = []
+
+        class Recording:
+            async def stream(self, request):
+                seen.append(request.max_tokens)
+                yield ChatChunk(text_delta="[]")
+
+        monkeypatch.setattr(module, "build_provider", lambda: Recording())
+        await extract_facts("用户：随便说说")
+        assert seen == [get_settings().llm_max_tokens]
+
+    @pytest.mark.asyncio
+    async def test_empty_array_is_a_valid_answer(self):
+        """"这轮确实没有可记的事实"是合法结论，不能跟空输出混为一谈。"""
+        assert _parse("[]") == []

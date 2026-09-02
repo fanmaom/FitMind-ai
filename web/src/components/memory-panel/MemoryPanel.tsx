@@ -2,20 +2,20 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Brain,
   ChartNoAxesCombined,
   ClipboardPlus,
+  ListChecks,
   PanelRightClose,
   PanelRightOpen,
-  Trash2,
   UserRound,
 } from "lucide-react";
 import { api } from "@/services/api";
+import { ActionPanel, type ActionItem } from "./ActionPanel";
 import { DataPanel } from "./DataPanel";
 import { ProfilePanel } from "./ProfilePanel";
 import { TrainingPanel } from "./TrainingPanel";
 
-type Tab = "profile" | "memory" | "data" | "training";
+type Tab = "profile" | "actions" | "data" | "training";
 
 export type Workout = {
   id: string;
@@ -35,22 +35,22 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
   const [open, setOpen] = useState(true);
   const [tab, setTab] = useState<Tab>("profile");
   const [profile, setProfile] = useState<Record<string, unknown>>({});
-  const [memories, setMemories] = useState<any[]>([]);
+  const [actions, setActions] = useState<ActionItem[]>([]);
   const [metrics, setMetrics] = useState<BodyMetric[]>([]);
   const [workouts, setWorkouts] = useState<Workout[]>([]);
   const [usage, setUsage] = useState<Record<string, number>>({});
 
   const load = useCallback(async () => {
-    const [nextProfile, nextMemories, nextMetrics, nextWorkouts, nextUsage] =
+    const [nextProfile, nextActions, nextMetrics, nextWorkouts, nextUsage] =
       await Promise.all([
         api<Record<string, unknown>>("/profile"),
-        api<any[]>("/memories"),
+        api<ActionItem[]>("/action-items"),
         api<BodyMetric[]>("/logs/body-metrics"),
         api<Workout[]>("/logs/workouts"),
         api<Record<string, number>>("/usage/summary"),
       ]);
     setProfile(nextProfile);
-    setMemories(nextMemories);
+    setActions(nextActions);
     setMetrics(nextMetrics);
     setWorkouts(nextWorkouts);
     setUsage(nextUsage);
@@ -59,6 +59,10 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
   useEffect(() => {
     load().catch(() => undefined);
   }, [load, refreshKey]);
+
+  async function refreshActions() {
+    setActions(await api<ActionItem[]>("/action-items"));
+  }
 
   async function refreshMetrics() {
     setMetrics(await api<BodyMetric[]>("/logs/body-metrics"));
@@ -82,7 +86,7 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
 
   const tabs = [
     ["profile", UserRound, "档案"],
-    ["memory", Brain, "记忆"],
+    ["actions", ListChecks, "待办"],
     ["data", ChartNoAxesCombined, "数据"],
     ["training", ClipboardPlus, "训练"],
   ] as const;
@@ -127,34 +131,8 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
           />
         )}
 
-        {tab === "memory" && (
-          <div className="space-y-3">
-            {memories.length === 0 && <Empty text="还没有长期记忆" />}
-            {memories.map((memory) => (
-              <div key={memory.id} className="rounded-lg border p-3">
-                <div className="flex justify-between gap-2">
-                  <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
-                    {memory.category}
-                  </span>
-                  <button
-                    onClick={async () => {
-                      await api(`/memories/${memory.id}`, { method: "DELETE" });
-                      setMemories((items) =>
-                        items.filter((item) => item.id !== memory.id),
-                      );
-                    }}
-                    className="text-slate-400 hover:text-red-500"
-                  >
-                    <Trash2 size={15} />
-                  </button>
-                </div>
-                <p className="mt-2 text-sm">{memory.content}</p>
-                <time className="mt-2 block text-xs text-slate-400">
-                  {new Date(memory.created_at).toLocaleDateString()}
-                </time>
-              </div>
-            ))}
-          </div>
+        {tab === "actions" && (
+          <ActionPanel items={actions} onChanged={refreshActions} />
         )}
 
         {tab === "data" && (
@@ -166,13 +144,5 @@ export function MemoryPanel({ refreshKey }: { refreshKey: number }) {
         )}
       </div>
     </aside>
-  );
-}
-
-function Empty({ text }: { text: string }) {
-  return (
-    <div className="flex min-h-24 items-center justify-center text-sm text-slate-400">
-      {text}
-    </div>
   );
 }

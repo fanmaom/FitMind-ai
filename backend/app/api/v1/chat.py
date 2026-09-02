@@ -13,6 +13,7 @@ from app.api.deps import RequestContext, get_context
 from app.core.logger import logger
 from app.models.conversation import Conversation
 from app.models.message import Message
+from app.services import interrupt
 from app.services.chat_service import run_turn
 
 router = APIRouter(prefix="/api/v1", tags=["chat"])
@@ -62,6 +63,23 @@ async def list_messages(
     )
     return [{"id": str(r.id), "role": r.role, "content": r.content,
              "status": r.status} for r in rows]
+
+
+@router.post("/conversations/{conversation_id}/interrupt", status_code=204)
+async def interrupt_turn(
+    conversation_id: uuid.UUID,
+    ctx: RequestContext = Depends(get_context),
+) -> None:
+    """请求中断该会话正在进行的回合。
+
+    先过 _get_conversation：否则任何人拿一个 uuid 就能掐断别人正在生成的回复。
+
+    对「当前没有回合在跑」不报错——用户点停止的瞬间回合可能刚好结束，那是竞态
+    而不是错误。旗子由 run_turn 在开头和 finally 里清理，不会残留到下一回合。
+    """
+    await _get_conversation(ctx, conversation_id)
+    interrupt.request(conversation_id)
+    logger.info(f"收到中断请求 conversation={conversation_id}")
 
 
 @router.post("/conversations/{conversation_id}/messages")

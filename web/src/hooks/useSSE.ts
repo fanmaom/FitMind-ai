@@ -4,11 +4,13 @@ import type { SSEEventName } from "@/types/chat";
 export async function streamChat(
   conversationId: string, text: string,
   onEvent: (event: SSEEventName, data: any) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   const response = await fetch(`${API_BASE}/conversations/${conversationId}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
     body: JSON.stringify({ text, client_message_id: crypto.randomUUID() }),
+    signal,
   });
   if (!response.ok || !response.body) throw new Error(await response.text());
   const reader = response.body.getReader();

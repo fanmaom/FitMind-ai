@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import AsyncIterator
 
 from app.core.agent.rule_fallback import try_rule_fallback
-from app.core.llm.client import ChatRequest, LLMError, LLMFatalError
+from app.core.llm.client import DEFAULT_MAX_TOKENS, ChatRequest, LLMError, LLMFatalError
 from app.core.llm.with_fallback import FallbackProvider
 from app.core.logger import logger
 from app.core.tools.registry import ToolContext, ToolNotFoundError, ToolValidationError, registry
@@ -15,6 +15,11 @@ L5_MESSAGE = (
     "模型服务暂时不可用，这个问题我没法用内置规则回答。"
     "你刚才的消息已经保存，稍后点重试即可，不用重新输入。"
 )
+
+# 失败反馈会原样进模型上下文，而模型很容易把它整句转述给用户。所以反馈里
+# 一律用工具的用户可见说法，并且明写"别转述"——用户不需要知道哪个工具炸了，
+# 只需要知道这一步没算出来。
+FEEDBACK_PREFIX = "[系统反馈，不要转述给用户，也不要提工具名]"
 
 
 @dataclass
@@ -30,11 +35,13 @@ class AgentLoop:
         tool_ctx: ToolContext | None,
         max_turns: int = 6,
         tool_timeout_s: float = 3.0,
+        max_output_tokens: int = DEFAULT_MAX_TOKENS,
     ) -> None:
         self.provider = provider
         self.tool_ctx = tool_ctx
         self.max_turns = max_turns
         self.tool_timeout_s = tool_timeout_s
+        self.max_output_tokens = max_output_tokens
 
     async def _execute_tool(self, name: str, args: dict) -> tuple[str, dict | None]:
         """执行工具，返回 (回灌给模型的文本, 给前端的卡片)。
@@ -42,19 +49,28 @@ class AgentLoop:
         任何失败都转成文本反馈而不是上抛异常——参数错了让模型自己改，
         查无数据让模型换个说法回复。抛给用户一个 500 是最差的选择。
         """
+        label = registry.label_of(name)
         try:
             result = await asyncio.wait_for(
                 registry.invoke(name, args, self.tool_ctx), timeout=self.tool_timeout_s,
             )
         except ToolValidationError as exc:
-            return str(exc), None
+            # 字段名必须留着，模型要靠它改参数；脱敏层拦在输出侧。
+            return f"{FEEDBACK_PREFIX} {exc}", None
         except ToolNotFoundError as exc:
-            return f"工具不存在：{exc}", None
+            # 这里反过来：模型编了个工具名，不点出来它改不过来。
+            return f"{FEEDBACK_PREFIX} 工具不存在：{exc}", None
         except asyncio.TimeoutError:
-            return f"工具 {name} 执行超时（{self.tool_timeout_s}s），可以换一种方式或稍后重试。", None
+            return (
+                f"{FEEDBACK_PREFIX} “{label}”执行超时（{self.tool_timeout_s}s）。"
+                f"用自然语言告诉用户这一步没算出来，换一种方式或稍后重试。", None
+            )
         except Exception as exc:  # noqa: BLE001
             logger.exception(f"工具 {name} 执行异常")
-            return f"工具 {name} 执行失败：{exc}", None
+            return (
+                f"{FEEDBACK_PREFIX} “{label}”执行失败：{exc}。"
+                f"用自然语言告诉用户这一步没成，不要暴露报错原文。", None
+            )
 
         card = None
         if isinstance(result, dict):
@@ -101,7 +117,9 @@ class AgentLoop:
                 pending_calls = None
 
                 async for chunk, lv in self.provider.stream_with_fallback(
-                    ChatRequest(messages=working, tools=tools),
+                    ChatRequest(
+                        messages=working, tools=tools, max_tokens=self.max_output_tokens,
+                    ),
                 ):
                     level = max(level, lv)
                     if chunk.text_delta:
@@ -111,6 +129,14 @@ class AgentLoop:
                         usage = chunk.usage
                     if chunk.tool_calls:
                         pending_calls = chunk.tool_calls
+                    if chunk.finish_reason == "length" and text_parts:
+                        # 说了一半被输出上限截断。空输出由降级层当失败重试，这里
+                        # 是"有正文但没说完"——重试会重复已经推给用户的字，只能
+                        # 留下记录：连续出现就该把 LLM_MAX_TOKENS 调大。
+                        logger.warning(
+                            f"本轮输出被 max_tokens={self.max_output_tokens} 截断，"
+                            f"已产出 {len(''.join(text_parts))} 字",
+                        )
 
                 if not pending_calls:
                     yield AgentEvent("done", {
@@ -123,9 +149,15 @@ class AgentLoop:
 
                 for tc in pending_calls:
                     tool_call_count += 1
-                    yield AgentEvent("tool_start", {"name": tc.name, "input": tc.arguments})
+                    label = registry.label_of(tc.name)
+                    # label 是给前端状态行用的；name/input 留给日志，不出网关。
+                    yield AgentEvent("tool_start", {
+                        "name": tc.name, "label": label, "input": tc.arguments,
+                    })
                     result_text, card = await self._execute_tool(tc.name, tc.arguments)
-                    yield AgentEvent("tool_result", {"name": tc.name, "summary": result_text[:200]})
+                    yield AgentEvent("tool_result", {
+                        "name": tc.name, "label": label, "summary": result_text[:200],
+                    })
                     if card:
                         yield AgentEvent("card", card)
                     working.append({

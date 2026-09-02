@@ -17,11 +17,46 @@ class DemoInput(BaseModel):
 
 
 def _make_tool(name: str = "demo", description: str = "演示工具", **kw):
+    kw.setdefault("label", "跑演示")
+
     @tool(name=name, description=description, **kw)
     async def fn(inp: DemoInput, ctx) -> dict:
         return {"doubled": inp.x * 2}
 
     return fn
+
+
+class TestUserFacingLabel:
+    """label 是这个工具的用户可见说法。内部 name 一旦出现在回复或状态行里，
+    用户就会看到 plan_strength_cycle 这种东西——线上真实发生过。"""
+
+    def test_label_is_on_the_spec(self):
+        assert _make_tool(label="跑一下演示").__tool_spec__.label == "跑一下演示"
+
+    def test_missing_label_is_a_type_error(self):
+        """必填。给个默认值（比如退化成 name）等于把泄漏藏起来。"""
+        with pytest.raises(TypeError):
+            @tool(name="nolabel", description="没有 label")
+            async def fn(inp: DemoInput, ctx) -> dict:
+                return {}
+
+    def test_blank_label_rejected(self):
+        with pytest.raises(TypeError):
+            _make_tool(label="   ")
+
+    def test_label_of_falls_back_to_name_for_unknown_tool(self):
+        """模型编了个工具名时，反馈里必须点出它编的那个名字，否则它改不过来。"""
+        reg = ToolRegistry()
+        assert reg.label_of("ghost_tool") == "ghost_tool"
+
+    def test_every_registered_tool_has_a_chinese_label(self):
+        from app.core.tools.registry import load_tools, registry
+
+        load_tools()
+        for spec in registry.all():
+            assert spec.label.strip(), f"{spec.name} 没有 label"
+            assert spec.label != spec.name, f"{spec.name} 的 label 就是内部名"
+            assert "_" not in spec.label, f"{spec.name} 的 label 带下划线：{spec.label}"
 
 
 class TestToolDecorator:
@@ -37,19 +72,19 @@ class TestToolDecorator:
 
     def test_requires_pydantic_input_annotation(self):
         with pytest.raises(TypeError):
-            @tool(name="bad", description="第一个参数没有模型注解")
+            @tool(name="bad", label="坏工具", description="第一个参数没有模型注解")
             async def bad(inp, ctx) -> dict:  # type: ignore[no-untyped-def]
                 return {}
 
     def test_rejects_non_basemodel_annotation(self):
         with pytest.raises(TypeError):
-            @tool(name="bad2", description="第一个参数注解不是 BaseModel")
+            @tool(name="bad2", label="坏工具", description="第一个参数注解不是 BaseModel")
             async def bad2(inp: dict, ctx) -> dict:
                 return {}
 
     def test_rejects_zero_arg_function(self):
         with pytest.raises(TypeError):
-            @tool(name="bad3", description="没有参数")
+            @tool(name="bad3", label="坏工具", description="没有参数")
             async def bad3() -> dict:
                 return {}
 
@@ -134,7 +169,7 @@ class TestInvocation:
     async def test_defaults_are_applied(self):
         reg = ToolRegistry()
 
-        @tool(name="echo", description="回显 label")
+        @tool(name="echo", label="回显", description="回显字段默认值")
         async def echo(inp: DemoInput, ctx) -> dict:
             return {"label": inp.label}
 

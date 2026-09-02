@@ -24,6 +24,7 @@ def _top_weight(sets: list[dict]) -> float:
 
 @tool(
     name="query_workout_history",
+    label="查询训练记录",
     description="查询某个动作近期的训练进展，返回训练次数、起止重量、容量变化等聚合指标。"
                 "回答「我深蹲进步了多少」「最近练得怎么样」这类问题时调用。",
     readonly=True,

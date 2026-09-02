@@ -81,6 +81,51 @@ class TestContent:
         assert msgs[-3:] == history + [{"role": "user", "content": "第二句"}]
 
 
+class TestNoInternalIdentifiers:
+    """注入提示的内容会被模型照抄进回复。档案里带一个 weight_kg，
+    用户就有机会在回答里看到 weight_kg——线上真实发生过。"""
+
+    FULL = {
+        "weight_kg": 82.0, "height_cm": 178.0, "age": 30, "sex": "male",
+        "activity": "moderate", "goal": "cut", "target_kg": 75.0,
+        "injuries": ["右踝"], "meal_scenarios": {"weekday_lunch": "office"},
+        "lifts": {"深蹲": 130},
+    }
+
+    def _profile_block(self, profile: dict) -> str:
+        msgs, _ = build_context(profile=profile, facts=[], history=[],
+                                user_text="x", today="2026-08-25")
+        return _joined(msgs[1:])
+
+    def test_system_prompt_forbids_leaking_internals(self):
+        assert "工具名" in SYSTEM_PROMPT, "系统提示里没有禁止暴露内部实现的规则"
+
+    def test_profile_carries_no_field_names(self):
+        block = self._profile_block(self.FULL)
+        for key in self.FULL:
+            assert key not in block, f"档案块里出现内部字段名 {key}"
+
+    def test_profile_carries_no_enum_values(self):
+        block = self._profile_block(self.FULL)
+        for raw in ("male", "moderate", "cut", "office", "weekday_lunch"):
+            assert raw not in block, f"档案块里出现内部枚举值 {raw}"
+
+    def test_profile_uses_chinese_labels_and_keeps_units(self):
+        block = self._profile_block(self.FULL)
+        assert "当前体重" in block
+        assert "减脂" in block
+        assert "cm" in block, "单位得留给模型，否则 178 是什么它得猜"
+
+    def test_profile_keeps_free_form_values(self):
+        block = self._profile_block(self.FULL)
+        assert "右踝" in block
+        assert "深蹲" in block
+
+    def test_profile_rendering_is_stable(self):
+        """档案每轮注入，渲染不稳定会打断缓存前缀。"""
+        assert self._profile_block(self.FULL) == self._profile_block(dict(self.FULL))
+
+
 class TestBudget:
     def test_reports_each_segment(self):
         _, budget = build_context(profile=PROFILE, facts=["a", "b"], history=[],

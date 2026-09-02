@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.agent.context import build_context
 from app.core.agent.fast_path import try_fast_path
 from app.core.agent.loop import AgentLoop
+from app.core.agent.scrub import TextScrubber
 from app.core.config import get_settings
 from app.core.database import async_session_maker, bind_rls_user
 from app.core.llm.factory import build_provider
@@ -24,6 +25,7 @@ from app.core.memory.facts import recall
 from app.core.memory.profile import load_profile
 from app.core.tools.registry import ToolContext, registry
 from app.models.message import Message
+from app.services import interrupt as interrupt_registry
 
 FAST_PATH_CARD_TYPE = {
     "log_workout": "workout_logged",
@@ -32,9 +34,18 @@ FAST_PATH_CARD_TYPE = {
 
 
 async def load_history(session: AsyncSession, conversation_id: uuid.UUID) -> list[dict]:
+    """取历史对话。
+
+    interrupted 与 done 同等纳入：用户已经看见了那半句话，模型也必须看见，
+    否则下一轮它会跟屏幕上还挂着的半句自相矛盾。streaming 状态仍排除——
+    那是正在写、还没定稿的。
+    """
     rows = (await session.scalars(
         select(Message)
-        .where(Message.conversation_id == conversation_id, Message.status == "done")
+        .where(
+            Message.conversation_id == conversation_id,
+            Message.status.in_(("done", "interrupted")),
+        )
         .order_by(Message.created_at),
     )).all()
     return [
@@ -69,11 +80,18 @@ async def run_turn(
     操作同一条 asyncpg 连接会炸 "another operation is in progress"。
     循环脱离了请求的 task 却没脱离请求的 session，等于只做了一半。
     """
-    async with _own_session(user_id) as session:
-        async for event in _run_turn_inner(
-            session, user_id, conversation_id, user_text, client_message_id,
-        ):
-            yield event
+    # 开局先清一次旗。中断请求可能在上一个回合**已经结束后**才到达，那面旗子
+    # 会留在登记表里，把这个回合一启动就当场杀掉。这是那种「上次点了停止，
+    # 之后第一条消息永远没反应」的诡异 bug。
+    interrupt_registry.clear(conversation_id)
+    try:
+        async with _own_session(user_id) as session:
+            async for event in _run_turn_inner(
+                session, user_id, conversation_id, user_text, client_message_id,
+            ):
+                yield event
+    finally:
+        interrupt_registry.clear(conversation_id)
 
 
 @asynccontextmanager
@@ -124,9 +142,12 @@ async def _run_turn_inner(
     texts: list[str] = []
     cards: list[dict] = []
 
-    async def finish(level: int, usage: dict | None, tool_calls: int, extra: dict) -> dict:
+    async def finish(
+        level: int, usage: dict | None, tool_calls: int, extra: dict,
+        *, status: str = "done",
+    ) -> dict:
         assistant.content = {"text": "".join(texts), "cards": cards}
-        assistant.status = "done"
+        assistant.status = status
         await record_usage(
             session=session, user_id=user_id, conversation_id=conversation_id,
             model=settings.llm_model or "rule-fallback", usage=usage,
@@ -134,7 +155,9 @@ async def _run_turn_inner(
             tool_calls=tool_calls, degradation_level=level,
         )
         await session.commit()
-        return {"event": "message_done",
+        # 前端要能区分「停止了」和「说完了」，否则渲染不出角标、也分不清该不该重试
+        event = "interrupted" if status == "interrupted" else "message_done"
+        return {"event": event,
                 "data": {"messageId": str(assistant.id), "degradedTo": level, **extra}}
 
     # 快路径：命中就不碰模型，全程几十毫秒
@@ -183,47 +206,98 @@ async def _run_turn_inner(
     loop = AgentLoop(
         provider, tool_ctx,
         max_turns=settings.agent_max_turns, tool_timeout_s=settings.agent_tool_timeout_s,
+        max_output_tokens=settings.llm_max_tokens,
     )
 
     level, usage, tool_calls = 0, None, 0
-    async for ev in loop.run(
+    interrupted = False
+    # 脱敏放在这一层，而不是 loop 里：这里是文本同时"发给用户"和"落库"的唯一
+    # 出口。落库的必须也是脱敏后的——重连要取回它，下一轮还要当历史喂回模型，
+    # 只擦流不擦库等于把泄漏留在库里慢慢发酵。
+    scrubber = TextScrubber()
+    events = loop.run(
         messages=messages, tools=registry.to_json_schemas(),
         profile=profile, user_text=user_text,
-    ):
-        if ev.type == "text":
-            texts.append(ev.data["text"])
-            yield {"event": "text_delta", "data": ev.data}
-        elif ev.type == "tool_start":
-            yield {"event": "tool_start", "data": ev.data}
-        elif ev.type == "tool_result":
-            tool_calls += 1
-            yield {"event": "tool_result", "data": ev.data}
-        elif ev.type == "card":
-            cards.append(ev.data)
-            yield {"event": "card", "data": ev.data}
-        elif ev.type == "done":
-            level, usage = ev.data["degradation_level"], ev.data.get("usage")
-        elif ev.type == "error":
-            level = ev.data["degradation_level"]
-            texts.append(ev.data["message"])
-            yield {"event": "error", "data": ev.data}
+    )
+    try:
+        async for ev in events:
+            # 每个事件前查一次旗。粒度到单个 token，且 loop.py 零改动——
+            # 中断是"不再消费"，不是"通知循环自己停"。
+            if interrupt_registry.is_requested(conversation_id):
+                interrupted = True
+                logger.info(f"回合被用户中断 conversation={conversation_id}")
+                break
+            if ev.type == "text":
+                safe = scrubber.feed(ev.data["text"])
+                if safe:
+                    texts.append(safe)
+                    yield {"event": "text_delta", "data": {"text": safe}}
+            elif ev.type == "tool_start":
+                # 只发 label。name 会变成"正在调用 plan_meals…"，input 里是
+                # 一串内部字段名——两样都没有理由送到浏览器。
+                yield {"event": "tool_start", "data": {"label": ev.data["label"]}}
+            elif ev.type == "tool_result":
+                tool_calls += 1
+                yield {"event": "tool_result", "data": {"label": ev.data["label"]}}
+            elif ev.type == "card":
+                cards.append(ev.data)
+                yield {"event": "card", "data": ev.data}
+            elif ev.type == "done":
+                level, usage = ev.data["degradation_level"], ev.data.get("usage")
+            elif ev.type == "error":
+                level = ev.data["degradation_level"]
+                # 先把扣在脱敏缓冲里的尾巴发出去，再接降级文案，否则顺序会颠倒
+                held = scrubber.flush()
+                if held:
+                    texts.append(held)
+                    yield {"event": "text_delta", "data": {"text": held}}
+                texts.append(ev.data["message"])
+                yield {"event": "error", "data": ev.data}
+    finally:
+        # `async for` + `break` 不会关闭异步生成器，Python 只在 GC 时才收。
+        # 不显式关，底层那条 httpx 流就一直悬着，连接池慢慢干涸——这种泄漏
+        # 平时完全看不出来，只在跑久了之后表现为"偶尔卡住"。
+        await events.aclose()
+
+    # 脱敏靠"扣住结尾等边界"实现，最后一段还在缓冲里。不 flush 就是吞掉一段话；
+    # 中断路径同样要 flush——用户已经看见的半句必须和落库的一致。
+    tail = scrubber.flush()
+    if tail:
+        texts.append(tail)
+        yield {"event": "text_delta", "data": {"text": tail}}
+
+    if interrupted:
+        # 已经执行完的工具写入不回滚（记进去的训练不该凭空消失），只停后续步骤。
+        # usage 通常拿不到：网关只在流末尾报 token 数，而中断的定义就是到不了
+        # 那里。仍然记一行——请求确实发生过，延迟和降级档是真实的。
+        yield await finish(level, usage, tool_calls, {"interrupted": True},
+                           status="interrupted")
+        # 刻意不投递抽取任务：从半句话里抽长期事实会污染 L2 记忆库，抽待办
+        # 更糟——半截建议会变成一条用户根本没读完的待跟进事项。
+        return
 
     yield await finish(level, usage, tool_calls, {})
 
     # 用户可见的回复已经完成；下面是重要但不紧急的异步抽取投递。
+    #
+    # 两个任务分开投，不合并成一个：事实抽取的判据是「用户明确说过的」，待办
+    # 抽取的判据恰好相反——只要助理提出的。塞进同一个 prompt 两边会互相污染。
+    # 分开之后 worker 各自独立事务、独立重试，待办抽取炸掉不会连坐 L2 记忆。
     try:
         conversation_text = f"用户：{user_text}\n助理：{''.join(texts)}"
+        source = {
+            "user_id": str(user_id),
+            "conversation_text": conversation_text,
+            "source_message_id": str(assistant.id),
+        }
+        await enqueue(session, "extract_memory", source, user_id=user_id)
         await enqueue(
             session,
-            "extract_memory",
-            {
-                "user_id": str(user_id),
-                "conversation_text": conversation_text,
-                "source_message_id": str(assistant.id),
-            },
+            "extract_actions",
+            {**source, "source_conversation_id": str(conversation_id)},
             user_id=user_id,
         )
         await session.commit()
     except Exception as exc:  # noqa: BLE001
         await session.rollback()
-        logger.warning(f"投递记忆抽取任务失败，不影响本轮回复：{exc}")
+        logger.warning(f"投递异步抽取任务失败，不影响本轮回复：{exc}")

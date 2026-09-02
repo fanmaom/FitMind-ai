@@ -3,6 +3,7 @@
 所有模型都要在这里导入，否则 Alembic autogenerate 看不到它们。
 """
 
+from app.models.action_item import ActionItem
 from app.models.body_metric import BodyMetric
 from app.models.conversation import Conversation
 from app.models.food import Food
@@ -16,6 +17,7 @@ from app.models.user import User
 from app.models.workout_log import WorkoutLog
 
 __all__ = [
+    "ActionItem",
     "BodyMetric",
     "Conversation",
     "Food",

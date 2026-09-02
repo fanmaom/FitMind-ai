@@ -74,3 +74,23 @@ def test_filled_llm_credentials_reported_as_configured(monkeypatch):
     from app.core.config import Settings
 
     assert Settings(_env_file=None).llm_configured is True
+
+
+def test_output_budget_default_matches_the_client_default(monkeypatch):
+    """两个默认值必须同源，否则改了一处、另一处悄悄留在旧值上。"""
+    from app.core.config import Settings
+    from app.core.llm.client import DEFAULT_MAX_TOKENS
+
+    assert Settings.model_fields["llm_max_tokens"].default == DEFAULT_MAX_TOKENS
+
+
+def test_output_budget_is_configurable(monkeypatch):
+    """换模型就要重调这个数：非推理模型 1024 够用，推理模型光思考就两千多。"""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setenv("JWT_SECRET", "z" * 32)
+    monkeypatch.setenv("LLM_API_KEY", "sk-real")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "16384")
+
+    from app.core.config import Settings
+
+    assert Settings(_env_file=None).llm_max_tokens == 16384
