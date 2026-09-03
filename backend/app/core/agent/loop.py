@@ -112,6 +112,23 @@ class AgentLoop:
         card = None
         if isinstance(result, dict):
             card = result.pop("__card__", None)
+        # 成功也要记一行。
+        #
+        # 原来只有失败才写日志，于是"模型压根没调这个工具"和"调了但没生效"在
+        # 日志里长得一模一样——都是什么都没有。排查线上那次"说了记下了但档案还是
+        # 空的"时，我只能靠翻数据库反推，因为日志里看不出模型到底调了什么。
+        #
+        # 只记工具名和结果里的关键标志位，不记完整入参：入参含用户的身体数据，
+        # 日志不是存这些东西的地方。
+        flags = ""
+        if isinstance(result, dict):
+            marks = [
+                f"{key}={result[key]}"
+                for key in ("written", "needs_confirmation", "deduplicated", "found")
+                if key in result
+            ]
+            flags = f" {' '.join(marks)}" if marks else ""
+        logger.info(f"工具执行 {name}{flags}")
         return json.dumps(result, ensure_ascii=False, default=str), card
 
     def _assistant_message(self, text: str, tool_calls: list) -> dict:
