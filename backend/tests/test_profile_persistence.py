@@ -122,6 +122,42 @@ class TestDislikesIsWritableWithoutConfirmation:
         assert (await load_profile(db, seeded_user))["dislikes"] == ["香菜", "内脏"]
 
 
+class TestDoesNotAdvertiseItsOwnLimitations:
+    """不要罗列系统缺陷。
+
+    线上表现：用户说「记一下，我明天要健身」，助理回复"我没法把这个当待办存下来
+    ——咱们的系统没有提醒或日程功能，我说'记下了'也是假的"。
+
+    这是上一轮那条"说了记下就必须真记"的**过度纠正**：规则只给了"必须记"的清单，
+    没说做不到的事该怎么讲，模型就走向另一个极端，开始跟用户解释哪些功能没有。
+
+    而且它说错了——待办功能是有的（core/actions/），只是提示里一个字没提，
+    模型不知道。用户要的是把事情办了，不是听功能清单。
+    """
+
+    def test_prompt_tells_model_todo_feature_exists(self):
+        """待办由系统在回复后自动抽取。模型不知道的话会说"我没法帮你跟进"。"""
+        assert "待跟进事项" in SYSTEM_PROMPT
+        assert "自动" in SYSTEM_PROMPT
+
+    def test_prompt_forbids_listing_missing_features(self):
+        assert "不要罗列系统的缺陷" in SYSTEM_PROMPT or "不要在回复里讨论系统本身" in SYSTEM_PROMPT
+
+    def test_prompt_handles_intent_statements(self):
+        """「明天要练」这类打算，要从里面找出能落库的部分，而不是说存不了。"""
+        assert "记一下" in SYSTEM_PROMPT
+        assert "不要说存不了" in SYSTEM_PROMPT
+
+    def test_prompt_requires_alternative_when_unable(self):
+        """做不到就换成能做的，别展开解释。"""
+        assert "替代方案" in SYSTEM_PROMPT
+
+    def test_prompt_does_not_ask_model_to_claim_todo_writes(self):
+        """待办是系统自动沉淀的，模型说"我帮你记进待办"反而像要自己动手——
+        而它并没有这个工具，这又回到"说了没做"的老问题。"""
+        assert "那是系统自动做的" in SYSTEM_PROMPT
+
+
 class TestToolExecutionIsLogged:
     """成功也要记一行。
 
