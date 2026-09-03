@@ -10,6 +10,7 @@ from app.api.v1.auth import router as auth_router
 from app.api.v1.chat import router as chat_router
 from app.api.v1.logs import router as logs_router
 from app.api.v1.memory import router as memory_router
+from app.api.v1.plans import router as plans_router
 from app.api.v1.usage import router as usage_router
 from app.core.config import get_settings
 from app.core.logger import logger
@@ -50,6 +51,7 @@ app.include_router(logs_router)
 app.include_router(chat_router)
 app.include_router(memory_router)
 app.include_router(actions_router)
+app.include_router(plans_router)
 app.include_router(usage_router)
 
 

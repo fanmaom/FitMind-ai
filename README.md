@@ -206,7 +206,7 @@ PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 P
 | 生成中断 | 热路径纯内存查询；跨进程靠 PG LISTEN/NOTIFY 广播 | `services/interrupt.py` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 721 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 854 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -442,12 +442,12 @@ Prompt 缓存是**前缀匹配**，前面变一个字节后面全部失效。所
 `core/domain/` 下的确定性纯函数。** 这不是等它错了再兜底，而是从一开始
 不给它算错的机会。
 
-### 15 个工具
+### 16 个工具
 
 | 类别 | 工具 |
 |---|---|
 | 计算 | `calc_energy_baseline` `calc_macros` `estimate_one_rm` `project_goal` |
-| 计划生成 | `plan_strength_cycle` `plan_cut_phase` `plan_meals` `check_plan_conflict` `get_plan_detail` |
+| 计划生成 | `plan_strength_cycle` `plan_cut_phase` `plan_meals` `check_plan_conflict` `get_plan_detail` `get_plan_day` |
 | 记录（写 L3/L1） | `log_workout` `log_body_metric` `update_profile` |
 | 查询 | `query_workout_history` `query_body_trend` `search_food` |
 
@@ -496,7 +496,7 @@ async def calc_macros(args: CalcMacrosArgs, ctx: ToolContext) -> dict:
 | `estimate_1rm` | 0.0011 ms |
 | `project_goal` | 0.0022 ms |
 
-15 个工具里 11 个都碰数据库，而它们共享同一个 `AsyncSession`——asyncpg 连接
+16 个工具里 12 个都碰数据库，而它们共享同一个 `AsyncSession`——asyncpg 连接
 不允许两个协程同时使用，并发这些工具会直接炸 `another operation is in
 progress`。真正能安全并发的只剩上面 4 个纯计算工具，而它们耗时在**微秒级**，
 省下来的时间比测量噪声还小，模型单轮响应却是秒级。
@@ -654,6 +654,67 @@ JSON 解析容错收在一处，记忆冲突消解和待办判重共用。判定
 
 ---
 
+## 计划表导入
+
+用户手上的计划多半是一份 Excel——健身博主发的模板、教练给的表格。让他对着
+表格一天天口述给助理是荒谬的：一份 4 周计划有 28 天 × 6 个字段，任何人都会在
+第三天放弃。
+
+上传 xlsx，解析成结构化计划落进 `plans`，之后可以直接问「今天吃多少」。
+
+### 真实文件是脏的
+
+拿来做验证的样例（网上流传的碳循环模板）第 1 周有 **9 列**而其余三周是 8 列，
+多出来那列夹在"一"和"二"之间，值是 138.4 / 111.2 / 53.4 / 1491——像是有人在
+旁边试算了一版没删掉。
+
+按"第 2..8 列就是周一到周日"硬读，第 1 周会**整周错位一天且不报错**：数字都在
+合理范围内，导入完看起来一切正常。所以列位置一律由**表头的星期字符**决定，
+认不出的列直接丢掉。
+
+解析中踩到的另外两个坑，都钉成了回归测试：
+
+| 现象 | 根因 |
+|---|---|
+| 热量与缺口两列同时变 `None` | `"缺口/盈余(kcal)"` 含 `kcal`，被热量规则先匹配，覆盖掉真正的热量值。行标签匹配改为按特异性排序 |
+| 全部 28 天的缺口被当脏数据丢弃 | 缺口是热量差，减脂计划里本来就是负数。上下界统一按 0 起判是错的 |
+
+### 预览与确认分两步
+
+导入会改两样东西：新增一份计划，以及**可能覆盖档案里的身体数据**。第二样是
+危险的——网上流传的模板都带着原作者的参数（样例是 91kg / 180cm / 25 岁），
+直接写进去等于把别人的身体数据变成用户自己的，而档案每轮都注入 prompt，
+之后所有热量计算都会按错的体重算。
+
+所以上传只解析、不落库，把整张表摆出来让用户核对。这也是数据进库前唯一能
+发现解析错位的机会。
+
+| 决策 | 理由 |
+|---|---|
+| 档案更新默认**不勾** | 默认值的方向比它省下的一次点击重要得多 |
+| `target_kg` / `goal` **完全不导入** | 那是"用户想要什么"，不该由一份下载来的模板决定 |
+| 预览结果不缓存、确认时重传文件 | 缓存需要带过期的临时存储，还要处理"用户停留半小时后才点确认"；重传几十 KB 成本几乎为零 |
+| 幂等按**内容指纹**而非文件字节 | 同一份计划另存一次字节就变了，而内容一模一样。用户不会理解为什么又多了一份 |
+| 沿用 `plans.type="cut"`，靠 `payload.source` 区分来源 | 另起一个 type 会让每个读计划的地方都要记得查两种——而 `get_plan_detail` 里已经有一处漏查了 |
+
+### 导入之后
+
+`get_plan_day` 工具让助理能回答「今天吃多少」「这周三练什么」。日期到周次的
+换算在纯函数里做，不交给模型——它不知道今天是周几，更不知道计划从哪天开始。
+
+真机验证（今天周四）：
+
+```
+用户：我今天该吃多少？练什么？
+工具：查询计划当日安排
+助理：今天是休息日，不安排训练。饮食上按计划是低碳日：
+      热量 1897 kcal，蛋白质 112 g，碳水 90 g，脂肪 121 g
+```
+
+与原表第 1 周周四逐格一致。
+
+---
+
 ## 用户数据隔离与隐私
 
 ### PostgreSQL 行级安全（RLS）
@@ -743,6 +804,9 @@ SSE 事件类型：`message_start` `text_delta` `tool_start` `tool_result` `card
 | POST | `/action-items` | 手动新建（不参与判重） |
 | PATCH | `/action-items/{id}` | 流转状态 `pending`/`done`/`ignored` |
 | DELETE | `/action-items/{id}` | 删除 |
+| GET | `/plans` | 我的计划列表（只回摘要） |
+| POST | `/plans/import/preview` | 上传 xlsx，只解析不落库 |
+| POST | `/plans/import` | 确认导入，`apply_profile` 决定是否更新档案 |
 
 ### 日志与用量
 
@@ -771,14 +835,14 @@ backend/
     core/
       agent/           Agent 循环、上下文组装、快路径、规则兜底、系统提示
       domain/          领域纯函数：能量 营养素 力量 配餐 冲突 推算
-      tools/           15 个工具 + 注册表
+      tools/           16 个工具 + 注册表
       memory/          L1 档案 / L2 事实 / 检索 query / 会话摘要 / 抽取 / 冲突消解 / embedding
       actions/         待办：抽取 / 判重 / 持久化
       jobs/            PostgreSQL 队列与 worker
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    14 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               721 个测试
+  tests/               854 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -837,7 +901,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 721 passed
+make test          # 854 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -850,7 +914,7 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **721 passed** |
+| 后端测试 | **854 passed** |
 | 总覆盖率 | **93%**（2312 statements，154 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |

@@ -10,7 +10,7 @@ from app.models.plan import Plan
 
 
 class GetPlanDetailInput(BaseModel):
-    plan_id: uuid.UUID = Field(description="plan_strength_cycle 返回的计划 ID")
+    plan_id: uuid.UUID = Field(description="计划 ID，由排计划或导入计划时返回")
     week: int = Field(ge=1, le=52, description="要查询的周次，从 1 开始")
 
 
@@ -21,12 +21,13 @@ class GetPlanDetailInput(BaseModel):
     readonly=True,
 )
 async def get_plan_detail(inp: GetPlanDetailInput, ctx: ToolContext) -> dict:
+    # 不限制 type。原来这里硬编码了 type=="strength"，于是减脂计划（无论是
+    # plan_cut_phase 生成的还是用户导入的）拿着正确的 plan_id 也查不到，
+    # 只会得到一句"计划不存在，或你没有权限"——一句会把人引向错误方向的提示。
+    #
+    # 限定 user_id 就够了：那才是这里真正要防的东西。
     plan = await ctx.session.scalar(
-        select(Plan).where(
-            Plan.id == inp.plan_id,
-            Plan.user_id == ctx.user_id,
-            Plan.type == "strength",
-        ),
+        select(Plan).where(Plan.id == inp.plan_id, Plan.user_id == ctx.user_id),
     )
     if plan is None:
         return {"found": False, "note": "计划不存在，或你没有权限读取该计划。"}
@@ -43,6 +44,7 @@ async def get_plan_detail(inp: GetPlanDetailInput, ctx: ToolContext) -> dict:
     return {
         "found": True,
         "plan_id": str(plan.id),
+        "plan_type": plan.type,
         "scheme": plan.payload.get("scheme"),
         **detail,
     }

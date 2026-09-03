@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { LoaderCircle } from "lucide-react";
+import { FileSpreadsheet, LoaderCircle } from "lucide-react";
+import { AccountMenu } from "@/components/auth/AccountMenu";
+import { PlanImportDialog } from "@/components/plans/PlanImportDialog";
 import { api } from "@/services/api";
 import { streamChat } from "@/hooks/useSSE";
 import { useChatStore } from "@/stores/chat";
@@ -14,6 +16,13 @@ const FALLBACK_TOOL_STATUS = "正在处理…";
 export function ChatView({ onChanged }: { onChanged: () => void }) {
   const store = useChatStore(); const [sending, setSending] = useState(false); const end = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const [email, setEmail] = useState<string>();
+  const [importing, setImporting] = useState(false);
+  useEffect(() => {
+    // 取当前账号只为在顶栏显示"这是谁的数据"。失败不做任何处理：拿不到邮箱
+    // 顶栏少一行字而已，不该因此挡住聊天——真正的鉴权失效会在发消息时暴露。
+    api<{ email: string }>("/me").then(u => setEmail(u.email)).catch(() => undefined);
+  }, []);
   useEffect(() => {
     // 新版 Chromium 的 scrollIntoView 可能返回 Promise。effect 若隐式返回它，
     // React 会把 Promise 当作清理函数，并在下一次流式更新时调用而崩溃。
@@ -57,5 +66,5 @@ export function ChatView({ onChanged }: { onChanged: () => void }) {
       if (store.conversationId) { const rows = await api<any[]>(`/conversations/${store.conversationId}/messages`).catch(() => []); store.setMessages(rows.map(r => ({ id: r.id, role: r.role, text: r.content.text ?? "", cards: r.content.cards ?? [], truncated: r.content.truncated, interrupted: r.status === "interrupted" }))); }
     } finally { setSending(false); abortRef.current = null; }
   }
-  return <section className="flex min-w-0 flex-1 flex-col bg-slate-50"><header className="border-b border-slate-200 bg-white px-6 py-4"><h1 className="text-lg font-bold">FitMind AI</h1><p className="text-xs text-slate-500">会记住你的训练目标、偏好与限制</p></header><div className="flex-1 overflow-y-auto p-5"><div className="mx-auto max-w-4xl space-y-6">{store.messages.length === 0 && <div className="py-20 text-center"><h2 className="text-2xl font-bold">今天想练什么？</h2><p className="mt-2 text-slate-500">我能记录训练、规划周期、计算营养，并根据你的场景配餐。</p></div>}{store.messages.map(m => <ChatMessage key={m.id} message={m}/>) }{store.toolStatus && <div className="flex items-center gap-2 text-sm text-blue-600"><LoaderCircle className="animate-spin" size={16}/>{store.toolStatus}</div>}<div ref={end}/></div></div><ChatComposer onSend={send} onStop={stop} sending={sending}/></section>;
+  return <section className="flex min-w-0 flex-1 flex-col bg-slate-50"><header className="flex items-center justify-between gap-4 border-b border-slate-200 bg-white px-6 py-4"><div><h1 className="text-lg font-bold">FitMind AI</h1><p className="text-xs text-slate-500">会记住你的训练目标、偏好与限制</p></div><div className="flex items-center gap-3"><button onClick={()=>setImporting(true)} className="flex items-center gap-1.5 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"><FileSpreadsheet size={13}/>导入计划表</button><AccountMenu email={email}/></div></header><div className="flex-1 overflow-y-auto p-5"><div className="mx-auto max-w-4xl space-y-6">{store.messages.length === 0 && <div className="py-20 text-center"><h2 className="text-2xl font-bold">今天想练什么？</h2><p className="mt-2 text-slate-500">我能记录训练、规划周期、计算营养，并根据你的场景配餐。</p><p className="mt-1 text-sm text-slate-400">已经有计划表？点右上角「导入计划表」，之后直接问我「今天吃多少」。</p></div>}{store.messages.map(m => <ChatMessage key={m.id} message={m}/>) }{store.toolStatus && <div className="flex items-center gap-2 text-sm text-blue-600"><LoaderCircle className="animate-spin" size={16}/>{store.toolStatus}</div>}<div ref={end}/></div></div><ChatComposer onSend={send} onStop={stop} sending={sending}/>{importing && <PlanImportDialog onClose={()=>setImporting(false)} onImported={onChanged}/>}</section>;
 }
