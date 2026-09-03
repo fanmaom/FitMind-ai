@@ -204,6 +204,7 @@ PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 P
 | 用户数据隔离 | PostgreSQL 行级安全 + 三角色分离 + JWT | `scripts/init_db.sql`, `core/database.py` |
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
 | 生成中断 | 热路径纯内存查询；跨进程靠 PG LISTEN/NOTIFY 广播 | `services/interrupt.py` |
+| 系统可扩展性 | 新增本地工具=新增一个文件；外部能力挂 MCP server，Agent 循环零改动 | `core/tools/registry.py`, `core/mcp/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
 | 测试与质量 | 854 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
@@ -464,6 +465,54 @@ async def calc_macros(args: CalcMacrosArgs, ctx: ToolContext) -> dict:
 
 `label` 是这个工具的**用户可见**说法，必填。`name` 只在系统内部流转：前端状态行、
 失败反馈、流式脱敏一律用 `label`（见下节）。
+
+### 挂载外部 MCP 工具
+
+想让助理用上本仓库没写的能力（查天气、读日历、搜文献），不必写代码——配置一个
+MCP server 即可。格式与 Claude Desktop / Cursor 一致，可以直接把现成配置贴过来：
+
+```bash
+MCP_SERVERS={"mcpServers":{"time":{"command":"uvx","args":["mcp-server-time"],"readonly":true}}}
+```
+
+接进来之后，MCP 工具与本地工具**在系统里完全等价**：同一套 schema 给模型、同一套
+参数校验、同一套失败反馈、同一套流式脱敏、同一套降级策略。**Agent 循环一行都没改。**
+
+脱敏能自动覆盖是因为词表从注册表现取（`scrub.py: build_vocab`）——所以
+"新增工具零改动"这条性质延伸到了外部工具，不需要在脱敏层另立一张表。
+
+几个必须在桥接层解决的问题：
+
+| 问题 | 处理 |
+|---|---|
+| 名字冲突 | 加 `mcp__<server>__` 前缀。双下划线分隔，与工具名自身的单下划线区分，才能可靠还原来源 |
+| **MCP 没有 label 这个概念** | 用 description 首句生成，放不下时退回工具名的可读形式（`get_current_time` → `get current time`）。缺了用户会看到"正在 mcp__weather__get_forecast…" |
+| **MCP 不表达副作用** | `readOnlyHint` 是后加的可选注解，绝大多数 server 不提供。默认按写操作对待，要标只读必须配置里显式声明——降级层据此决定能否重试，误判成只读会导致重复写入 |
+| Schema 不能直接用 | 注册表要 Pydantic 模型，MCP 给裸 JSON Schema。包一个透传模型：**交给模型的是 server 的原始 schema**（用 Any 拼的那个没类型没枚举值，模型填不对参数），校验只查必填项 |
+| **超时不能与本地工具共用** | 本地工具全是纯计算或一次查库，3 秒很宽松；MCP 在另一个进程还要走网络，同一个 3 秒会让一大半正常调用变成超时——而那种超时看起来和真故障一模一样。`ToolSpec.timeout_s` 按工具区分 |
+
+stdio 上的 JSON-RPC 有两个坑，都会表现为难定位的随机故障：
+
+- **必须用 `readline()` 而不是 `read(n)`**：stdout 是流，不保证一次读到整行。
+  粘包后 `json.loads` 报 "Extra data"，完全指不到真正的原因。
+- **stderr 必须单独接管**：MCP server 常把日志写 stderr，不读它管道缓冲区满了
+  之后子进程会**阻塞在写日志上**，表现为工具调用随机超时。
+
+失败一律降级：npx 没装、网络不通、server 自己崩了都很正常，任何单个 server 的
+失败只记日志然后跳过——用户宁可少几个工具，也不能因为一个可选的外部依赖连不上
+就打不开页面。配置写错（JSON 笔误）同样只告警，不阻塞启动。
+
+**已知限制（有意的取舍）**：
+
+- 镜像只预装了 `uv`（约 40MB），所以 `uvx` 系 server 开箱可用；`npx` 系更常见，
+  但 Node + npm 要 200MB 以上，为一个可选功能让镜像大三倍不划算。需要的话在
+  `backend/Dockerfile` 补一行 Node 安装。
+- 只实现 stdio 传输，没做 HTTP/SSE。绝大多数现成 server 以 stdio 分发，而 HTTP
+  形式要额外部署服务、配鉴权、管生命周期。传输层在 `MCPClient` 里是独立一段，
+  将来加 HTTP 只需换掉收发。
+- **MCP server 在进程外，拿不到 `ToolContext`**，因此不受 RLS 保护。它能看到的
+  只有模型传给它的参数，但那些参数可能含用户数据——挂载不受信任的 server 等于
+  把这部分数据交出去。这是 MCP 的固有属性，不是这里的实现缺陷。
 
 ### 稳定性处理
 
@@ -835,7 +884,8 @@ backend/
     core/
       agent/           Agent 循环、上下文组装、快路径、规则兜底、系统提示
       domain/          领域纯函数：能量 营养素 力量 配餐 冲突 推算
-      tools/           16 个工具 + 注册表
+      tools/           16 个本地工具 + 注册表
+      mcp/             外部 MCP server 客户端与工具桥接
       memory/          L1 档案 / L2 事实 / 检索 query / 会话摘要 / 抽取 / 冲突消解 / embedding
       actions/         待办：抽取 / 判重 / 持久化
       jobs/            PostgreSQL 队列与 worker

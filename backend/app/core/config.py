@@ -50,6 +50,19 @@ class Settings(BaseSettings):
     agent_tool_timeout_s: float = 3.0
     agent_history_window: int = 6
 
+    # MCP（外部工具）
+    #
+    # 一段 JSON，格式与 Claude Desktop / Cursor 的 mcpServers 一致，用户可以直接
+    # 把现成配置贴过来：
+    #   MCP_SERVERS={"mcpServers":{"time":{"command":"uvx","args":["mcp-server-time"]}}}
+    #
+    # 留空则完全不启用——这是默认值，因为外部 server 是不可控依赖，
+    # 不该在用户没主动配置时就去启动子进程。
+    mcp_servers: str = ""
+    # MCP 工具的调用超时。比本地工具（3s）宽松：外部 server 往往要走网络，
+    # 3 秒会让一大半正常调用变成超时。
+    mcp_tool_timeout_s: float = 15.0
+
     @field_validator("database_url")
     @classmethod
     def _must_be_async_driver(cls, v: str) -> str:

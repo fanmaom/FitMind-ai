@@ -69,6 +69,18 @@ class AgentLoop:
         logger.warning(f"{reason} 后已回滚事务，session 恢复可用")
         return True
 
+    def _timeout_for(self, name: str) -> float:
+        """这个工具的超时。
+
+        本地工具和外部 MCP 工具不能用同一个值。本地工具全是纯计算或一次查库，
+        3 秒已经很宽松；而 MCP 工具在另一个进程里、往往还要走网络，3 秒会让
+        一大半正常调用变成超时——那种超时看起来和真故障一模一样。
+        """
+        spec = registry.find(name)
+        if spec is not None and spec.timeout_s is not None:
+            return spec.timeout_s
+        return self.tool_timeout_s
+
     async def _execute_tool(self, name: str, args: dict) -> tuple[str, dict | None]:
         """执行工具，返回 (回灌给模型的文本, 给前端的卡片)。
 
@@ -76,9 +88,10 @@ class AgentLoop:
         查无数据让模型换个说法回复。抛给用户一个 500 是最差的选择。
         """
         label = registry.label_of(name)
+        timeout_s = self._timeout_for(name)
         try:
             result = await asyncio.wait_for(
-                registry.invoke(name, args, self.tool_ctx), timeout=self.tool_timeout_s,
+                registry.invoke(name, args, self.tool_ctx), timeout=timeout_s,
             )
         except ToolValidationError as exc:
             # 字段名必须留着，模型要靠它改参数；脱敏层拦在输出侧。

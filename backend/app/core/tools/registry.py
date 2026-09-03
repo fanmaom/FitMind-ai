@@ -49,6 +49,12 @@ class ToolSpec:
     handler: Callable[..., Awaitable[Any]]
     readonly: bool
     needs_confirm: bool
+    # 这个工具专属的超时。None 表示用 Agent 的默认值。
+    #
+    # 存在的理由：本地工具全是纯计算或一次查库，3 秒很宽松；而外部 MCP 工具在
+    # 另一个进程里、往往还要走网络，同一个 3 秒会让一大半正常调用变成超时，
+    # 而那种超时看起来和真故障一模一样。
+    timeout_s: float | None = None
 
 
 def tool(
@@ -127,6 +133,14 @@ class ToolRegistry:
         if name not in self._specs:
             raise ToolNotFoundError(f"未注册的工具：{name}")
         return self._specs[name]
+
+    def find(self, name: str) -> ToolSpec | None:
+        """取 spec，未注册时返回 None 而不是抛。
+
+        给"想读某个属性、读不到就用默认值"的场景用（比如按工具区分超时）。
+        用 get 会要求调用方接异常，那太重了。
+        """
+        return self._specs.get(name)
 
     def label_of(self, name: str) -> str:
         """用户可见的说法。未注册时返回原名——那说明模型编了个工具名，
