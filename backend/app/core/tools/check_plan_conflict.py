@@ -25,7 +25,9 @@ async def check_plan_conflict(inp: CheckPlanConflictInput, ctx: ToolContext) -> 
     profile = await load_profile(ctx.session, ctx.user_id)
     current_phase = profile.get("goal", inp.requested_goal)
     report = detect_conflict(inp.requested_goal, inp.wants_strength_gain, current_phase)
-    options = [option.__dict__ for option in report.options]
+    # 用 as_dict 而不是 __dict__：前者保证 prompt 字段永远有值（缺失时退回
+    # title），前端不必再判空。少一个可空字段就少一处"点了没反应"的可能。
+    options = [option.as_dict() for option in report.options]
     result = {
         "has_conflict": report.has_conflict,
         "reason": report.reason,
