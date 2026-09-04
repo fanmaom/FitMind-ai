@@ -204,10 +204,10 @@ PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 P
 | 用户数据隔离 | PostgreSQL 行级安全 + 三角色分离 + JWT | `scripts/init_db.sql`, `core/database.py` |
 | 接口设计 | REST + SSE 流式，OpenAPI 自动生成前端类型 | `api/v1/` |
 | 生成中断 | 热路径纯内存查询；跨进程靠 PG LISTEN/NOTIFY 广播 | `services/interrupt.py` |
-| 系统可扩展性 | 新增本地工具=新增一个文件；外部能力挂 MCP server，Agent 循环零改动 | `core/tools/registry.py`, `core/mcp/` |
+| 系统可扩展性 | 新增本地工具=新增一个文件；双向 MCP：能接别人的 server，也能被别人当 server 用 | `core/tools/registry.py`, `core/mcp/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 854 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 960 个测试，92% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -513,6 +513,85 @@ stdio 上的 JSON-RPC 有两个坑，都会表现为难定位的随机故障：
 - **MCP server 在进程外，拿不到 `ToolContext`**，因此不受 RLS 保护。它能看到的
   只有模型传给它的参数，但那些参数可能含用户数据——挂载不受信任的 server 等于
   把这部分数据交出去。这是 MCP 的固有属性，不是这里的实现缺陷。
+
+### 反向：把这个助理挂给别的 MCP 客户端
+
+上一节是「我接别人的」，这一节是「别人接我的」——两个方向是完全独立的两套实现，
+消息名相同但角色相反（一个主动发请求，一个被动读请求），代码几乎没有可复用的。
+
+配好之后可以在 Claude Desktop / Cursor 里直接问「我上次卧推多少」，数据仍然在
+这个系统里，只是多了一个入口：
+
+```json
+{
+  "mcpServers": {
+    "fitmind": {
+      "command": "python",
+      "args": ["-m", "app.mcp_stdio"],
+      "cwd": "/绝对路径/backend",
+      "env": {
+        "FITMIND_TOKEN": "<登录后拿到的 access token>",
+        "DATABASE_URL": "postgresql+asyncpg://...",
+        "JWT_SECRET": "<与服务端一致>"
+      }
+    }
+  }
+}
+```
+
+#### 三个必须处理好的问题
+
+**1. stdout 是协议通道，一行日志就能毁掉它。**
+
+MCP stdio 用 stdout 逐行传 JSON-RPC，而 `logger` 默认写 stdout，且 `load_tools()`
+在注册工具时就会打一行 INFO。那一行会直接混进协议流，客户端报 "unexpected token"
+——而真正的原因是一条毫不相关的日志。
+
+所以 `route_to_stderr()` 必须在**导入任何业务模块之前**执行。`app/mcp_stdio.py`
+里那几个 import 的位置是刻意的，不是没整理。
+
+**2. 身份从哪来。**
+
+MCP stdio 是单用户本地进程模型，没有登录概念。而这个系统里每个工具都要
+`user_id`——数据隔离靠 PG RLS 强制，没有它一行都读不到。
+
+解法是从 `FITMIND_TOKEN` 读一个已签发的 access token，启动时换成 `user_id` 并绑定
+RLS 上下文（与 `api/deps.py` 同一套做法）。每次工具调用开一个新 session：MCP server
+是长驻进程，一个 session 用几小时会累积未回滚的事务状态，而这里没有 Web 框架的
+请求边界来兜底。
+
+**3. 默认只暴露只读工具。**
+
+理由不是"怕出 bug"，而是风险与收益不对称：
+
+- 收益侧：外部客户端要的是「查我的数据」。写操作在对话式界面里本来就该由本系统
+  自己的 UI 承担——那里有确认流程、有卡片反馈、有撤销的余地。
+- 风险侧：token 明文躺在客户端配置文件里。泄漏后果是「数据被改」还是「数据被读」，
+  差别很大。
+
+白名单按 `ToolSpec.readonly` 自动筛，不手写名单——手写的迟早和新增工具脱节。
+要开写操作得显式设 `FITMIND_MCP_ALLOW_WRITE=1`，启动时会打一条警告。
+
+#### 另外几个细节
+
+| 处理 | 原因 |
+|---|---|
+| 不转发外部 MCP 工具 | 它们是这个进程从别的 server 借来的，再转出去会形成一条谁也说不清的调用链，而且那些 server 的副作用我们无从判断 |
+| 「不存在」与「不允许」回同一句话 | 区分了就等于告诉调用方"这个工具存在但你不能用"，是一条不必要的信息泄漏 |
+| 参数错误回 `isError` 而非 JSON-RPC error | 前者是"工具执行失败"，客户端的模型会看到并自行改参数；后者会被当成传输层故障 |
+| 异常只回类型名 | 异常里可能带 SQL 片段、表名、连接串。全貌留在日志 |
+| 单条消息失败不退出进程 | 退出会让客户端失去所有工具，而问题可能只是一条畸形请求 |
+| 响应必须 `flush()` | stdout 接管道时是块缓冲的，不 flush 响应会攒到进程退出——客户端表现为"发了请求没有任何回应"然后超时 |
+| 用 `StreamReader` 而非 `input()` | 后者阻塞事件循环，会让工具里的数据库查询永远不返回 |
+
+**配置时最容易踩的坑**：`DATABASE_URL` 必须指向**存着你数据的那个库**。这个入口
+是独立进程，不经过 API 容器——填成开发库而线上数据在 Docker 库里（或反过来），
+表现是「工具调用全部成功，但查什么都是空的」。没有任何报错，因为 RLS 上下文绑对了、
+SQL 也执行了，只是库里确实没有那个用户的数据。我在验证时就先踩了这个。
+
+**安全边界**：这个入口拿着 token 就等于拿着那个用户的身份。它适合「自己在本机把
+自己的数据接进常用客户端」，不适合分发给他人。要做多用户场景需要 MCP 的 HTTP
+传输 + OAuth，那是另一个量级的工作。
 
 ### 稳定性处理
 
@@ -885,14 +964,14 @@ backend/
       agent/           Agent 循环、上下文组装、快路径、规则兜底、系统提示
       domain/          领域纯函数：能量 营养素 力量 配餐 冲突 推算
       tools/           16 个本地工具 + 注册表
-      mcp/             外部 MCP server 客户端与工具桥接
+      mcp/             双向 MCP：接外部 server（client）+ 供外部调用（server）
       memory/          L1 档案 / L2 事实 / 检索 query / 会话摘要 / 抽取 / 冲突消解 / embedding
       actions/         待办：抽取 / 判重 / 持久化
       jobs/            PostgreSQL 队列与 worker
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    14 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               854 个测试
+  tests/               960 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -951,7 +1030,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 854 passed
+make test          # 960 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -964,8 +1043,8 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **854 passed** |
-| 总覆盖率 | **93%**（2312 statements，154 missed） |
+| 后端测试 | **960 passed** |
+| 总覆盖率 | **92%**（3456 statements，268 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |
 | 迁移 | 14 个，全部验证 upgrade → downgrade → upgrade 往返 |
