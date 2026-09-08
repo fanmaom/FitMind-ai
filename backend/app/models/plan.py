@@ -2,7 +2,7 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, String
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,3 +22,8 @@ class Plan(Base, UUIDPrimaryKey, TimestampMixin):
     type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    parent_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("plans.id", ondelete="SET NULL"), nullable=True,
+    )
+    adjustment_reason: Mapped[str | None] = mapped_column(Text, nullable=True)

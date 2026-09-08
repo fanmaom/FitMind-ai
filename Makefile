@@ -9,7 +9,7 @@ ALEMBIC := backend/.venv/bin/alembic
 
 .DEFAULT_GOAL := help
 .PHONY: help up down restart rebuild logs logs-worker ps seed db \
-        test cov check gen migrate venv dev-api dev-worker dev-web clean
+        test eval cov check gen migrate venv dev-api dev-worker dev-web clean
 
 help:  ## 显示可用命令
 	@grep -hE '^[a-z-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -76,6 +76,9 @@ gen:  ## 从运行中的 API 重新生成前端类型（勿手改 api.gen.ts）
 
 test:  ## 后端全量测试
 	cd backend && .venv/bin/python -m pytest -q
+
+eval:  ## 对运行中的服务执行 Agent 核心场景评测
+	backend/.venv/bin/python evals/runner.py
 
 cov:  ## 后端测试 + 覆盖率
 	cd backend && .venv/bin/python -m pytest --cov=app --cov-report=term -q

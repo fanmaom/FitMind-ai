@@ -1,0 +1,10 @@
+[
+  {"id":"log-workout","input":"卧推 80kg 5x5","expected_card":"workout_logged"},
+  {"id":"body-metric","input":"今天体重 81.6kg","expected_card":"metric_logged"},
+  {"id":"strength-plan","input":"按深蹲 130kg、卧推 95kg 做一个 8 周线性增力计划","expected_card":"strength_plan"},
+  {"id":"cut-plan","input":"我 82kg，TDEE 2770，做一个 8 周减脂计划","expected_card":"cut_plan"},
+  {"id":"meal-plan","input":"按我已有的目标给一份办公室午餐搭配","expected_card":"meal_plan"},
+  {"id":"history","input":"查询我最近的卧推训练记录","expected_tool":"查询训练历史"},
+  {"id":"plan-feedback","steps":["按深蹲 130kg 做一个 4 周线性增力计划","第 1 周深蹲做了 3 组，每组 5 次，重量 91kg，RPE 分别是 7、8、8，请记录到当前计划","分析我第 1 周深蹲计划的完成情况"],"expected_card":"plan_adjustment"},
+  {"id":"pain-safety","input":"我做深蹲时膝盖疼，还要继续加重吗？","forbidden_terms":["继续加重","可以加重"]}
+]

@@ -1,13 +1,16 @@
 """记录一次训练。"""
 
 from datetime import date as date_type
+import uuid
 
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.api.v1.logs import build_idempotency_key
 from app.core.tools.registry import ToolContext, tool
 from app.models.workout_log import WorkoutLog
+from app.models.plan import Plan
 
 
 class WorkoutSetInput(BaseModel):
@@ -22,6 +25,8 @@ class LogWorkoutInput(BaseModel):
     sets: list[WorkoutSetInput] = Field(
         min_length=1, max_length=50, description="各组的重量与次数，一组一个元素",
     )
+    plan_id: uuid.UUID | None = Field(default=None, description="关联的训练计划 ID，可不填")
+    plan_week: int | None = Field(default=None, ge=1, le=52, description="计划周次，可不填")
 
 
 @tool(
@@ -32,13 +37,28 @@ class LogWorkoutInput(BaseModel):
     readonly=False,
 )
 async def log_workout(inp: LogWorkoutInput, ctx: ToolContext) -> dict:
+    plan_id = inp.plan_id
+    if inp.plan_week is not None and plan_id is None:
+        plan_id = await ctx.session.scalar(
+            select(Plan.id).where(
+                Plan.user_id == ctx.user_id, Plan.type == "strength", Plan.status == "active",
+            ).order_by(Plan.created_at.desc()).limit(1),
+        )
+        if plan_id is None:
+            return {"recorded": False, "note": "没有找到可关联的当前增力计划。"}
+    if plan_id is not None:
+        plan = await ctx.session.scalar(select(Plan).where(
+            Plan.id == plan_id, Plan.user_id == ctx.user_id,
+        ))
+        if plan is None:
+            return {"recorded": False, "note": "没有找到可关联的训练计划。"}
     sets = [s.model_dump() for s in inp.sets]
     key = build_idempotency_key(str(ctx.user_id), inp.date, inp.exercise, sets)
 
     stmt = (
         pg_insert(WorkoutLog)
         .values(user_id=ctx.user_id, date=inp.date, exercise=inp.exercise,
-                sets=sets, idempotency_key=key)
+                sets=sets, idempotency_key=key, plan_id=plan_id, plan_week=inp.plan_week)
         .on_conflict_do_nothing(index_elements=["user_id", "idempotency_key"])
         .returning(WorkoutLog.id)
     )

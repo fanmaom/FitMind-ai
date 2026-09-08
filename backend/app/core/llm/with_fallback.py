@@ -17,6 +17,7 @@ CORE_TOOL_NAMES: list[str] = [
     "calc_energy_baseline",
     "calc_macros",
     "log_workout",
+    "analyze_plan_progress",
     "query_body_trend",
     "query_workout_history",
 ]

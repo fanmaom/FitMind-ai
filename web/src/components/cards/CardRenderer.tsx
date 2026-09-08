@@ -61,13 +61,24 @@ function ConflictCard({ p, onPick, busy }: { p: any; onPick?: (text: string) => 
     {busy && <p className="mt-2 text-xs text-slate-400">正在回复，稍候即可选择</p>}
   </div>;
 }
+function PlanAdjustmentCard({ p, onPick, busy }: CardProps) {
+  const labels: Record<string, string> = { increase: "建议加重", hold: "维持观察", reduce: "建议降重", deload: "建议卸载", stop: "暂停自动调整" };
+  const completion = Math.round(n(p.completion_rate) * 100);
+  const prompt = `我确认接受${p.exercise}第${p.week}周的调整建议：从 ${p.target_weight_kg}kg 调整为 ${p.suggested_weight_kg}kg。请创建新版本计划。`;
+  return <div className={`${shell} border-blue-200`}>
+    <div className="flex items-start justify-between gap-3"><div><h3 className="font-semibold">训练计划反馈 · {p.exercise}</h3><p className="mt-1 text-sm text-slate-500">第 {p.week} 周 · {labels[p.action] ?? p.action}</p></div>{p.version && <Badge c="bg-blue-100 text-blue-700">版本 {p.version}</Badge>}</div>
+    <div className="mt-3 grid grid-cols-3 gap-2"><Stat label="完成率" value={`${completion}%`} /><Stat label="平均 RPE" value={p.average_rpe ?? "—"} /><Stat label="建议重量" value={`${p.suggested_weight_kg} kg`} /></div>
+    <p className="mt-3 rounded bg-slate-50 p-2 text-sm text-slate-700">{p.reason}</p>
+    {p.applied ? <p className="mt-3 text-sm font-medium text-emerald-700">已生成新版本，原计划已保留。</p> : p.can_apply && <button type="button" disabled={busy || !onPick} onClick={() => onPick?.(prompt)} className="mt-3 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50">接受并生成新版本</button>}
+  </div>;
+}
 function Stat({ label, value }: { label: string; value: string }) { return <div className="rounded bg-slate-50 p-3"><div className="text-xs text-slate-500">{label}</div><b className="text-xl">{value}</b></div>; }
 function Badge({ c, children }: { c: string; children: React.ReactNode }) { return <span className={`rounded px-2 py-1 ${c}`}>{children}</span>; }
 
 type CardProps = { p: any; onPick?: (text: string) => void; busy?: boolean };
 
 export function CardRenderer({ card, onPick, busy }: { card: Card; onPick?: (text: string) => void; busy?: boolean }) {
-  const map: Record<string, React.ComponentType<CardProps>> = { workout_logged: WorkoutCard, metric_logged: MetricCard, macros: MacrosCard, projection: ProjectionCard, strength_plan: StrengthPlanCard, cut_plan: CutPlanCard, meal_plan: MealPlanCard, conflict: ConflictCard };
+  const map: Record<string, React.ComponentType<CardProps>> = { workout_logged: WorkoutCard, metric_logged: MetricCard, macros: MacrosCard, projection: ProjectionCard, strength_plan: StrengthPlanCard, cut_plan: CutPlanCard, meal_plan: MealPlanCard, conflict: ConflictCard, plan_adjustment: PlanAdjustmentCard };
   const Component = map[card.type];
   if (!Component) return <details className={shell}><summary>未知卡片：{card.type}</summary><pre className="mt-2 overflow-auto text-xs">{JSON.stringify(card.payload, null, 2)}</pre></details>;
   // onPick / busy 目前只有 ConflictCard 用得上，但统一往下传：将来任何卡片要加

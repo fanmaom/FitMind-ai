@@ -3,7 +3,7 @@
 import uuid
 from datetime import date as date_type
 
-from sqlalchemy import Date, ForeignKey, String, UniqueConstraint
+from sqlalchemy import Date, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,3 +25,7 @@ class WorkoutLog(Base, UUIDPrimaryKey, TimestampMixin):
     exercise: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     sets: Mapped[list[dict]] = mapped_column(JSONB, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        PGUUID(as_uuid=True), ForeignKey("plans.id", ondelete="SET NULL"), nullable=True, index=True,
+    )
+    plan_week: Mapped[int | None] = mapped_column(Integer, nullable=True)
