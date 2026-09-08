@@ -421,3 +421,134 @@ class TestStdoutStaysClean:
             import app.core.logger as logger_module
 
             importlib.reload(logger_module)
+
+
+class TestPreflight:
+    """连错库必须在启动时炸掉，不能带着假象跑起来。
+
+    这是我自己踩过的坑：MCP server 在本机跑、连了本机的库，而数据在 Docker 的
+    库里。结果是**每个工具都调用成功、每个都返回空**，全程零报错——因为 token
+    解得开、RLS 绑得上、SQL 也执行了，只是库里确实没有那个用户。
+
+    危险的不是"查不到数据"，而是客户端的模型会把空结果转述成「你还没有任何
+    训练记录」。这是一句听起来完全正常的假话，用户没有任何线索知道它错了。
+    所以宁可起不来。
+    """
+
+    @pytest.mark.asyncio
+    async def test_passes_when_the_user_exists_here(self, db, seeded_user):
+        from app.core.mcp.server import preflight
+
+        assert await preflight(db, seeded_user) is None
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_user_that_is_not_in_this_database(self, db):
+        """核心用例：token 合法但库里没这个人——就是连错库的表现。"""
+        from app.core.mcp.server import preflight
+
+        stranger = uuid.uuid4()
+        problem = await preflight(db, stranger)
+
+        assert problem is not None, "库里没这个用户却放行了，工具会全部静默返回空"
+        # 诊断必须说出是哪个用户、以及"连错库"这个最可能的原因，
+        # 否则用户只知道"起不来"，不知道往哪查。
+        assert str(stranger) in problem
+        assert "连错库" in problem
+
+    @pytest.mark.asyncio
+    async def test_diagnostic_names_the_database_it_connected_to(self, db):
+        """不说清"你现在连的是哪个库"，用户就只能靠猜。"""
+        from app.core.config import get_settings
+        from app.core.mcp.server import preflight, safe_dsn
+
+        problem = await preflight(db, uuid.uuid4())
+        assert safe_dsn(get_settings().database_url) in problem
+
+    @pytest.mark.asyncio
+    async def test_reports_connection_failure_as_such(self):
+        """连不上和"连上了但没这个人"是两个不同的排查方向，不能混成一句话。"""
+        from app.core.mcp.server import preflight
+
+        class Unreachable:
+            async def execute(self, *a, **kw):
+                raise ConnectionRefusedError("Connect call failed")
+
+        problem = await preflight(Unreachable(), uuid.uuid4())
+        assert "连不上数据库" in problem
+
+    @pytest.mark.asyncio
+    async def test_reports_missing_users_table_as_a_migration_problem(self):
+        """空库和连错库都表现为"查不到"，但一个要跑迁移、一个要改连接串。"""
+        from sqlalchemy.exc import ProgrammingError
+
+        from app.core.mcp.server import preflight
+
+        class NoSchema:
+            def __init__(self):
+                self.calls = 0
+
+            async def execute(self, *a, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    return None  # SELECT 1 通过：库是连上的
+                raise ProgrammingError("SELECT 1 FROM users", {}, Exception("undefined table"))
+
+        problem = await preflight(NoSchema(), uuid.uuid4())
+        assert "没有 users 表" in problem
+        assert "alembic upgrade head" in problem
+
+    @pytest.mark.asyncio
+    async def test_a_hanging_database_times_out_instead_of_freezing(self, monkeypatch):
+        """挂死比报错更难查：客户端只显示"server 未启动"，没有任何输出可看。"""
+        import app.core.mcp.server as server_module
+
+        monkeypatch.setattr(server_module, "PREFLIGHT_TIMEOUT_S", 0.05)
+
+        class Hangs:
+            async def execute(self, *a, **kw):
+                await asyncio.sleep(10)
+
+        problem = await server_module.preflight(Hangs(), uuid.uuid4())
+        assert "没有响应" in problem
+
+
+class TestSafeDsn:
+    """诊断信息会被 MCP 客户端收进它自己的日志文件，密码不能出现在里面。"""
+
+    def test_strips_the_password_but_keeps_what_identifies_the_database(self):
+        from app.core.mcp.server import safe_dsn
+
+        dsn = safe_dsn("postgresql+asyncpg://appuser:sup3rsecret@dbhost:5433/fitmind")
+        assert "sup3rsecret" not in dsn
+        # host / port / dbname 三者才足以判断"是不是连错库"
+        assert "dbhost" in dsn and "5433" in dsn and "fitmind" in dsn
+
+    def test_unparseable_url_is_not_echoed_back(self):
+        """解析失败时不能把原串回出去——那里面可能就带着密码。"""
+        from app.core.mcp.server import safe_dsn
+
+        assert "hunter2" not in safe_dsn("::: not a url ::: hunter2")
+
+
+class TestPreflightIsActuallyWired:
+    """上面那些只证明 preflight 逻辑对。这个证明它真的挡在 serve 前面。"""
+
+    @pytest.mark.asyncio
+    async def test_run_stdio_refuses_to_serve_for_a_user_not_in_this_database(self):
+        from app.core.mcp.server import EXIT_PREFLIGHT_FAILED, run_stdio
+        from app.core.security import create_access_token
+
+        # 一个签名完全合法、但库里不存在的用户——正是连错库时的情形。
+        token = create_access_token(str(uuid.uuid4()))
+
+        # 拿到这个退出码就说明它在 _stdin_reader() 之前就返回了：
+        # 真进了 serve，pytest 下的 sys.stdin 不是真管道，会是另一种失败。
+        assert await run_stdio(token) == EXIT_PREFLIGHT_FAILED
+
+    @pytest.mark.asyncio
+    async def test_bad_token_and_wrong_database_use_different_exit_codes(self):
+        """两者排查方向完全不同，退出码不该一样。"""
+        from app.core.mcp.server import EXIT_BAD_TOKEN, EXIT_PREFLIGHT_FAILED, run_stdio
+
+        assert EXIT_BAD_TOKEN != EXIT_PREFLIGHT_FAILED
+        assert await run_stdio("这不是一个 token") == EXIT_BAD_TOKEN

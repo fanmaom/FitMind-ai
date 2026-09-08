@@ -9,7 +9,7 @@ client.py 是**主动方**：起子进程、发 tools/list、发 tools/call。
 这里是**被动方**：读 stdin 上别人发来的请求，回响应。协议消息名一样，
 但代码几乎没有可复用的，所以是独立一个文件。
 
-## 三个必须处理好的问题
+## 四个必须处理好的问题
 
 **1. stdout 是协议通道，不能写日志。**
 MCP stdio 用 stdout 逐行传 JSON-RPC。混进一行 INFO 日志，客户端就报
@@ -31,6 +31,14 @@ user_id——数据隔离靠 PG RLS 强制，没有它一行都读不到。
   差别很大。
 
 白名单按 ToolSpec.readonly 自动筛，不手写名单——手写的那种迟早和新增工具脱节。
+
+**4. 连错库必须在启动时炸掉。**
+这个入口是独立进程，DATABASE_URL 自己配。填错了库，token 照样解得开（密钥和库
+是两个独立配置）、RLS 照样绑得上、SQL 照样执行成功——只是每张表都返回零行，
+全程零报错。客户端的模型于是把空结果转述成「你还没有任何训练记录」。
+
+这比崩溃危险：它是一句听起来完全正常的假话，用户没有线索知道它错了。所以
+preflight() 在 serve 之前确认「这个库里真的有这个用户」，不满足就退出。
 """
 
 from __future__ import annotations
@@ -48,6 +56,15 @@ PROTOCOL_VERSION = "2024-11-05"
 
 SERVER_NAME = "fitmind"
 SERVER_VERSION = "1.0"
+
+# 启动自检的超时。库连不上时 asyncpg 可能一直挂着重试，而挂死比报错更难查——
+# 客户端只显示"server 未启动"，没有任何输出可看。
+PREFLIGHT_TIMEOUT_S = 10.0
+
+# 进程退出码。分开是为了让人一眼看出是"凭据不对"还是"连的库不对"——
+# 两者的排查方向完全不同。
+EXIT_BAD_TOKEN = 2
+EXIT_PREFLIGHT_FAILED = 3
 
 # JSON-RPC 标准错误码。用标准码而不是自定义：客户端据此决定要不要重试、
 # 要不要提示用户，自定义码它只能当成未知错误。
@@ -283,8 +300,98 @@ async def _stdin_reader() -> asyncio.StreamReader:
     return reader
 
 
+def safe_dsn(url: str) -> str:
+    """连接串去掉密码，只留 host:port/dbname。
+
+    诊断信息里必须带这个——"连错库"是最常见的配置错误，而不告诉用户"你现在
+    连的是哪个库"，他就只能靠猜。但同样不能把密码打进日志：stderr 会被 MCP
+    客户端收集进它自己的日志文件。
+    """
+    try:
+        from sqlalchemy.engine import make_url
+
+        u = make_url(url)
+        return f"{u.host or '?'}:{u.port or 5432}/{u.database or '?'}"
+    except Exception:  # noqa: BLE001
+        # 解析失败本身也是有用信息，但不能把原串回出去（带密码）。
+        return "<DATABASE_URL 无法解析>"
+
+
+async def preflight(session, user_id: uuid.UUID) -> str | None:
+    """启动自检：确认这个进程连的库里真的有这个用户。
+
+    返回 None 表示通过，否则返回一段给人看的诊断。
+
+    ## 为什么这件事必须在启动时做
+
+    连错库时，**没有任何一步会报错**：token 用 JWT_SECRET 解得开（密钥和库是两
+    个独立配置）、RLS 上下文绑得上、SQL 也执行成功——只是每张表都返回零行。
+
+    于是外部客户端的模型看到空结果，会转述成"你还没有任何训练记录"。这是一句
+    听起来完全正常的假话，用户没有任何线索知道它错了。相比之下进程起不来是刺眼
+    的、有明确指向的失败。所以这里选择硬失败。
+
+    session 由调用方创建和关闭：这个函数只做检查，不管生命周期。
+    """
+    from sqlalchemy import text
+    from sqlalchemy.exc import ProgrammingError
+
+    from app.core.config import get_settings
+
+    dsn = safe_dsn(get_settings().database_url)
+
+    async def _check() -> str | None:
+        try:
+            await session.execute(text("SELECT 1"))
+        except Exception as exc:  # noqa: BLE001
+            return (
+                f"连不上数据库 {dsn}（{type(exc).__name__}）。\n"
+                f"这个入口是独立进程，不走 API 容器，所以它自己需要一个能连通的 "
+                f"DATABASE_URL。从本机连 Docker 里的库要用映射到宿主机的端口，"
+                f"而不是 compose 里的服务名。"
+            )
+
+        try:
+            row = (
+                await session.execute(
+                    text("SELECT 1 FROM users WHERE id = CAST(:uid AS uuid)"),
+                    {"uid": str(user_id)},
+                )
+            ).first()
+        except ProgrammingError:
+            return (
+                f"数据库 {dsn} 里没有 users 表。\n"
+                f"这个库大概没跑过迁移，先执行 alembic upgrade head，"
+                f"或者确认 DATABASE_URL 指对了库名。"
+            )
+
+        if row is None:
+            return (
+                f"token 对应的用户在数据库 {dsn} 里不存在（user={user_id}）。\n"
+                f"\n"
+                f"最常见的原因是连错库：这个入口是独立进程，它的 DATABASE_URL 必须"
+                f"指向真正存着你数据的那个库。容器内是 postgres:5432，从本机连要用"
+                f"映射到宿主机的端口。\n"
+                f"\n"
+                f"这里选择直接退出，是因为放行的后果更糟——每个工具都会返回空结果"
+                f"且不报任何错，客户端的模型会把它转述成「你还没有任何记录」，"
+                f"一句听起来完全正常的假话。"
+            )
+        return None
+
+    try:
+        return await asyncio.wait_for(_check(), timeout=PREFLIGHT_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        # 挂死比报错更难查：客户端只会显示"server 未启动"，没有任何输出。
+        return (
+            f"连接数据库 {dsn} 超过 {PREFLIGHT_TIMEOUT_S:.0f} 秒没有响应。\n"
+            f"确认库在跑、端口通、防火墙没挡。"
+        )
+
+
 async def run_stdio(token: str, *, readonly_only: bool = True) -> int:
     """入口：校验 token，然后在 stdio 上服务。返回进程退出码。"""
+    from app.core.database import async_session_maker
     from app.core.security import decode_token
     from app.core.tools.registry import load_tools
 
@@ -292,8 +399,23 @@ async def run_stdio(token: str, *, readonly_only: bool = True) -> int:
         user_id = uuid.UUID(decode_token(token))
     except ValueError as exc:
         # 这条必须写 stderr（logger 已改道），并且不能把 token 打出来。
-        logger.error(f"FITMIND_TOKEN 无效：{exc}")
-        return 2
+        logger.error(
+            f"FITMIND_TOKEN 无效：{exc}。"
+            f"注意 JWT_SECRET 与签发这个 token 的服务端不一致时，"
+            f"报错和「已过期」完全一样——两个都要对一下。",
+        )
+        return EXIT_BAD_TOKEN
+
+    # 自检必须在 serve 之前。见 preflight 的说明：连错库不会报错，只会让
+    # 每个工具静静地返回空结果。
+    session = async_session_maker()
+    try:
+        problem = await preflight(session, user_id)
+    finally:
+        await session.close()
+    if problem:
+        logger.error(problem)
+        return EXIT_PREFLIGHT_FAILED
 
     load_tools()
     server = MCPServer(user_id, readonly_only=readonly_only)

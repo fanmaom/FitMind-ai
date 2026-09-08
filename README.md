@@ -207,7 +207,7 @@ PID 1 而它**不转发 SIGTERM**。加 `exec` 让 uvicorn 顶替 shell 成为 P
 | 系统可扩展性 | 新增本地工具=新增一个文件；双向 MCP：能接别人的 server，也能被别人当 server 用 | `core/tools/registry.py`, `core/mcp/` |
 | 可扩展性 | 新增工具一个装饰器；新增记忆类型一个 job handler | `core/tools/registry.py`, `core/jobs/worker.py` |
 | 输出安全 | 内部标识符三层拦截：提示禁令 + 反馈用人话 + 流式脱敏 | `core/agent/scrub.py`, `core/agent/glossary.py` |
-| 测试与质量 | 960 个测试，92% 覆盖率，迁移往返验证 | `tests/` |
+| 测试与质量 | 970 个测试，93% 覆盖率，迁移往返验证 | `tests/` |
 
 ---
 
@@ -531,7 +531,7 @@ stdio 上的 JSON-RPC 有两个坑，都会表现为难定位的随机故障：
       "cwd": "/绝对路径/backend",
       "env": {
         "FITMIND_TOKEN": "<登录后拿到的 access token>",
-        "DATABASE_URL": "postgresql+asyncpg://...",
+        "DATABASE_URL": "postgresql+asyncpg://fitness_app:***@localhost:5433/fitness",
         "JWT_SECRET": "<与服务端一致>"
       }
     }
@@ -539,7 +539,11 @@ stdio 上的 JSON-RPC 有两个坑，都会表现为难定位的随机故障：
 }
 ```
 
-#### 三个必须处理好的问题
+`DATABASE_URL` 要指向**真正存着你数据的那个库**。用 Docker 起的话，容器内是
+`postgres:5432`，从本机连要用映射到宿主机的端口（本项目默认 `5433`）——填成
+`5432` 大概率连到本机另一个库上。填错不用担心记不住，启动时会拦下来，见下文第 4 条。
+
+#### 四个必须处理好的问题
 
 **1. stdout 是协议通道，一行日志就能毁掉它。**
 
@@ -572,6 +576,43 @@ RLS 上下文（与 `api/deps.py` 同一套做法）。每次工具调用开一�
 白名单按 `ToolSpec.readonly` 自动筛，不手写名单——手写的迟早和新增工具脱节。
 要开写操作得显式设 `FITMIND_MCP_ALLOW_WRITE=1`，启动时会打一条警告。
 
+**4. 连错库必须在启动时炸掉。**
+
+这是我自己踩的坑，也是这个功能里唯一一个**会让系统说假话**的失败模式。
+
+这个入口是独立进程，`DATABASE_URL` 自己配。填错库之后没有任何一步会报错：token
+用 `JWT_SECRET` 解得开（密钥和库是两个独立配置）、RLS 上下文绑得上、SQL 也执行成功
+——只是每张表都返回零行。
+
+于是客户端的模型看到空结果，把它转述成「你还没有任何训练记录」。**这比崩溃危险得多**：
+它是一句听起来完全正常的话，用户没有任何线索知道它是错的。我第一次验证时就以为
+是 RLS 出了 bug，查了半天才发现是自己连错库。
+
+所以 `preflight()` 在 `serve()` 之前确认「这个库里真的有这个用户」，不满足就退出：
+
+```
+$ FITMIND_TOKEN=... python -m app.mcp_stdio     # DATABASE_URL 指向了错的库
+退出码 3
+ERROR - token 对应的用户在数据库 localhost:5432/fitness 里不存在（user=bf48664a-...）。
+
+最常见的原因是连错库：这个入口是独立进程，它的 DATABASE_URL 必须指向真正存着
+你数据的那个库。容器内是 postgres:5432，从本机连要用映射到宿主机的端口。
+
+这里选择直接退出，是因为放行的后果更糟——每个工具都会返回空结果且不报任何错，
+客户端的模型会把它转述成「你还没有任何记录」，一句听起来完全正常的假话。
+```
+
+几个刻意的选择：
+
+| 处理 | 原因 |
+|---|---|
+| 诊断里带上库的 `host:port/dbname` | 不说清「你现在连的是哪个库」，用户只能靠猜 |
+| 但抹掉密码 | stderr 会被 MCP 客户端收进它自己的日志文件 |
+| 「连不上」「没有 users 表」「没这个用户」分成三句话 | 三者都表现为查不到，但一个要改连接串、一个要跑迁移、一个要改库 |
+| 退出码分 2（凭据）和 3（连错库） | 排查方向完全不同 |
+| 自检有 10 秒超时 | 挂死比报错更难查——客户端只显示「server 未启动」，没有任何输出可看 |
+| token 无效时提示「和已过期报错相同」 | `JWT_SECRET` 与签发方不一致时，报错和过期一模一样，两个都得对 |
+
 #### 另外几个细节
 
 | 处理 | 原因 |
@@ -583,11 +624,6 @@ RLS 上下文（与 `api/deps.py` 同一套做法）。每次工具调用开一�
 | 单条消息失败不退出进程 | 退出会让客户端失去所有工具，而问题可能只是一条畸形请求 |
 | 响应必须 `flush()` | stdout 接管道时是块缓冲的，不 flush 响应会攒到进程退出——客户端表现为"发了请求没有任何回应"然后超时 |
 | 用 `StreamReader` 而非 `input()` | 后者阻塞事件循环，会让工具里的数据库查询永远不返回 |
-
-**配置时最容易踩的坑**：`DATABASE_URL` 必须指向**存着你数据的那个库**。这个入口
-是独立进程，不经过 API 容器——填成开发库而线上数据在 Docker 库里（或反过来），
-表现是「工具调用全部成功，但查什么都是空的」。没有任何报错，因为 RLS 上下文绑对了、
-SQL 也执行了，只是库里确实没有那个用户的数据。我在验证时就先踩了这个。
 
 **安全边界**：这个入口拿着 token 就等于拿着那个用户的身份。它适合「自己在本机把
 自己的数据接进常用客户端」，不适合分发给他人。要做多用户场景需要 MCP 的 HTTP
@@ -971,7 +1007,7 @@ backend/
       llm/             provider 抽象、备用模型、用量记录、判定调用
     models/            SQLAlchemy 模型
   alembic/versions/    14 个迁移，全部验证过 upgrade → downgrade → upgrade 往返
-  tests/               960 个测试
+  tests/               970 个测试
   scripts/             init_db.sql（角色与 RLS）、seed_demo.py、seed_foods.py
 
 web/src/
@@ -1030,7 +1066,7 @@ LLM 未配置时不会启动失败——数据库、认证、记录功能正常�
 ## 测试
 
 ```bash
-make test          # 960 passed
+make test          # 970 passed
 make cov           # 覆盖率
 make check         # 后端测试 + 覆盖率 + 前端 tsc + next build
 ```
@@ -1043,8 +1079,8 @@ embedding 与模型调用在单测里都有替身，真实网关只在少数标�
 
 | 项 | 结果 |
 |---|---|
-| 后端测试 | **960 passed** |
-| 总覆盖率 | **92%**（3456 statements，268 missed） |
+| 后端测试 | **970 passed** |
+| 总覆盖率 | **93%**（3495 statements，261 missed） |
 | 领域纯函数模块 | 96–100% |
 | 前端 | `tsc --noEmit` 通过，Next.js 16 production build 通过 |
 | 迁移 | 14 个，全部验证 upgrade → downgrade → upgrade 往返 |

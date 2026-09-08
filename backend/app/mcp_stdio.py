@@ -17,6 +17,12 @@
       }
     }
 
+## DATABASE_URL 必须指向真正存着数据的那个库
+
+这是独立进程，不走 API 容器。填错库不会报错，只会让每个工具静静地返回空结果——
+所以启动时会先自检「这个库里有没有这个用户」，不满足就退出（退出码 3），
+而不是带着一个只会说「你还没有任何记录」的假象跑起来。
+
 ## 为什么日志改道是这个文件里的第一件事
 
 MCP stdio 用 **stdout 传 JSON-RPC**。而 app.core.logger 默认写 stdout，且
@@ -38,7 +44,7 @@ route_to_stderr()
 import asyncio
 
 from app.core.logger import logger
-from app.core.mcp.server import run_stdio
+from app.core.mcp.server import EXIT_BAD_TOKEN, run_stdio
 
 # 环境变量名。用 FITMIND_ 前缀而不是复用 JWT_*：这是"以某个用户身份运行"的
 # 凭据，与服务端的签名密钥是两件不同的东西，混在一起容易配错。
@@ -57,7 +63,7 @@ def main() -> int:
             f"缺少 {TOKEN_ENV}。先在应用里登录，拿到 access token 后写进 "
             f"MCP 客户端配置的 env 里。",
         )
-        return 2
+        return EXIT_BAD_TOKEN
 
     allow_write = os.environ.get(ALLOW_WRITE_ENV, "").strip() in ("1", "true", "yes")
     if allow_write:
