@@ -54,11 +54,15 @@ __pycache__/
 *$py.class
 .venv/
 backend/.venv/
+.eval-venv/
 .pytest_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 *.egg-info/
+
+# Agent 评测运行结果（每次运行都会重新生成）
+evals/reports/
 
 # 私人资料不入库
 *.docx
