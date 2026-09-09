@@ -4,12 +4,6 @@ from app.core.config import get_settings
 from app.core.llm.client import LLMProvider
 from app.core.llm.openai_provider import OpenAIProvider
 
-DEFAULT_BASE_URLS = {
-    "openai": "https://api.openai.com/v1",
-    "anthropic": "https://api.anthropic.com",
-}
-
-
 def build_provider(model: str | None = None) -> LLMProvider:
     """构造主模型或指定模型的 provider。
 
@@ -26,9 +20,9 @@ def build_provider(model: str | None = None) -> LLMProvider:
         )
 
     target = model or settings.llm_model
-    base_url = settings.llm_base_url or DEFAULT_BASE_URLS[settings.llm_provider]
+    base_url = settings.effective_llm_base_url
 
-    if settings.llm_provider == "openai":
+    if settings.llm_provider in {"openai", "qwen"}:
         return OpenAIProvider(base_url=base_url, api_key=settings.llm_api_key, model=target)
 
     if settings.llm_provider == "anthropic":

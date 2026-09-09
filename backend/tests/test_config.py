@@ -94,3 +94,18 @@ def test_output_budget_is_configurable(monkeypatch):
     from app.core.config import Settings
 
     assert Settings(_env_file=None).llm_max_tokens == 16384
+
+
+def test_qwen_has_compatible_defaults(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@localhost/db")
+    monkeypatch.setenv("JWT_SECRET", "z" * 32)
+    monkeypatch.setenv("LLM_PROVIDER", "qwen")
+    monkeypatch.setenv("LLM_API_KEY", "sk-qwen")
+    monkeypatch.setenv("LLM_MODEL", "qwen-plus")
+
+    from app.core.config import Settings
+
+    settings = Settings(_env_file=None)
+    assert settings.effective_llm_base_url == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    assert settings.effective_embedding_base_url == settings.effective_llm_base_url
+    assert settings.effective_embedding_api_key == "sk-qwen"

@@ -58,6 +58,19 @@ JWT_SECRET=刚才生成的随机字符串
 
 如果没有配置模型，项目仍能启动，但对话能力会受到限制。
 
+使用阿里云百炼 Qwen 时配置：
+
+```dotenv
+LLM_PROVIDER=qwen
+LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=你的百炼API-Key
+LLM_MODEL=qwen-plus
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIM=1536
+```
+
+如果控制台提供了带 Workspace ID 的专属兼容地址，优先用它替换 `LLM_BASE_URL`。
+
 ### 4. 启动
 
 确保 Docker Desktop 正在运行，然后执行：

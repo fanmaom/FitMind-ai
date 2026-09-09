@@ -17,14 +17,19 @@ async def embed_texts(texts: list[str]) -> list[list[float]]:
         return []
 
     settings = get_settings()
-    url = f"{settings.llm_base_url.rstrip('/')}/embeddings"
+    url = f"{settings.effective_embedding_base_url.rstrip('/')}/embeddings"
+    payload = {"model": settings.embedding_model, "input": texts}
+    # OpenAI text-embedding-3 与百炼 text-embedding-v4 都支持显式维度。
+    # 固定为数据库向量列的维度，切换供应商时无需重建 pgvector 表。
+    if settings.llm_provider == "qwen" or settings.embedding_model.startswith("text-embedding-3"):
+        payload["dimensions"] = settings.embedding_dim
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_SECONDS) as client:
             response = await client.post(
                 url,
-                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
-                json={"model": settings.embedding_model, "input": texts},
+                headers={"Authorization": f"Bearer {settings.effective_embedding_api_key}"},
+                json=payload,
             )
             response.raise_for_status()
         data = sorted(response.json()["data"], key=lambda item: item["index"])

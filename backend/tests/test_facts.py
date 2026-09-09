@@ -443,6 +443,7 @@ class TestEmbedding:
         monkeypatch.setattr(embedding.httpx, "AsyncClient", _FakeClient)
         vecs = await embedding.embed_texts(["测试文本"])
         assert len(vecs[0]) == get_settings().embedding_dim
+        assert _FakeClient.last_request["json"]["dimensions"] == 1536
 
     @pytest.mark.asyncio
     async def test_batch_preserves_order(self, monkeypatch):

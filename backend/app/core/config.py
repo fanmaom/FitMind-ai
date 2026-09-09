@@ -9,6 +9,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.llm.client import DEFAULT_MAX_TOKENS
 
+PROVIDER_DEFAULT_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "anthropic": "https://api.anthropic.com",
+}
+
 # 相对 __file__ 解析而非 CWD——否则从 backend/ 还是仓库根启动会得到不同结果。
 # 两个位置都找，靠后的优先：仓库根的 .env 同时被 docker compose 的 env_file 使用。
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -34,7 +40,7 @@ class Settings(BaseSettings):
     jwt_expire_minutes: int = 60 * 24 * 7
 
     # LLM
-    llm_provider: Literal["openai", "anthropic"] = "openai"
+    llm_provider: Literal["openai", "qwen", "anthropic"] = "openai"
     llm_base_url: str = ""
     llm_api_key: str = Field(description="模型服务 API Key")
     llm_model: str = "gpt-4o-mini"
@@ -44,6 +50,8 @@ class Settings(BaseSettings):
     llm_max_tokens: int = DEFAULT_MAX_TOKENS
     embedding_model: str = "text-embedding-3-small"
     embedding_dim: int = 1536
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
 
     # Agent
     agent_max_turns: int = 6
@@ -86,6 +94,18 @@ class Settings(BaseSettings):
         而是启动时告警 + build_provider() 时报明确错误。
         """
         return bool(self.llm_api_key.strip() and self.llm_model.strip())
+
+    @property
+    def effective_llm_base_url(self) -> str:
+        return self.llm_base_url.strip() or PROVIDER_DEFAULT_BASE_URLS[self.llm_provider]
+
+    @property
+    def effective_embedding_base_url(self) -> str:
+        return self.embedding_base_url.strip() or self.effective_llm_base_url
+
+    @property
+    def effective_embedding_api_key(self) -> str:
+        return self.embedding_api_key.strip() or self.llm_api_key
 
 
 @lru_cache
