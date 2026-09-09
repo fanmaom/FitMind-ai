@@ -102,6 +102,9 @@ def test_qwen_has_compatible_defaults(monkeypatch):
     monkeypatch.setenv("LLM_PROVIDER", "qwen")
     monkeypatch.setenv("LLM_API_KEY", "sk-qwen")
     monkeypatch.setenv("LLM_MODEL", "qwen-plus")
+    monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    monkeypatch.delenv("EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.delenv("EMBEDDING_API_KEY", raising=False)
 
     from app.core.config import Settings
 
