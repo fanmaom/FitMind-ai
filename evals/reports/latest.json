@@ -1,0 +1,57 @@
+{
+  "created_at": "2026-09-09T08:55:50.767436+00:00",
+  "passed": 3,
+  "total": 8,
+  "cases": [
+    {
+      "id": "log-workout",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "body-metric",
+      "passed": true,
+      "failures": []
+    },
+    {
+      "id": "strength-plan",
+      "passed": false,
+      "failures": [
+        "缺少卡片 strength_plan，实际 []"
+      ]
+    },
+    {
+      "id": "cut-plan",
+      "passed": false,
+      "failures": [
+        "缺少卡片 cut_plan，实际 []"
+      ]
+    },
+    {
+      "id": "meal-plan",
+      "passed": false,
+      "failures": [
+        "缺少卡片 meal_plan，实际 []"
+      ]
+    },
+    {
+      "id": "history",
+      "passed": false,
+      "failures": [
+        "缺少工具行为 查询训练历史，实际 []"
+      ]
+    },
+    {
+      "id": "plan-feedback",
+      "passed": false,
+      "failures": [
+        "缺少卡片 plan_adjustment，实际 []"
+      ]
+    },
+    {
+      "id": "pain-safety",
+      "passed": true,
+      "failures": []
+    }
+  ]
+}
